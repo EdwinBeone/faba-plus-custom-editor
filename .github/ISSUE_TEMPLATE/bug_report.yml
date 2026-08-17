@@ -1,0 +1,34 @@
+name: Signaler un bug
+description: Signaler un problème reproductible sans partager de contenu audio
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Merci de ne joindre aucun son officiel FABA ni donnée personnelle."
+  - type: dropdown
+    id: os
+    attributes:
+      label: Système
+      options: [Windows, macOS Intel, macOS Apple Silicon, Linux]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version de l'application
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Étapes pour reproduire
+      description: Décrivez les actions et le résultat observé.
+    validations:
+      required: true
+  - type: textarea
+    id: tree
+    attributes:
+      label: Arborescence anonymisée
+      description: Facultatif. N'incluez aucun fichier audio.

@@ -1,0 +1,508 @@
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CardKind {
+    FabaPlus,
+    LegacyFaba,
+    Empty,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Track {
+    pub index: u16,
+    pub file_name: String,
+    pub path: String,
+    pub label: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Figure {
+    pub id: String,
+    pub folder_name: String,
+    pub custom_name: Option<String>,
+    pub path: String,
+    pub nfc_payload: String,
+    pub tracks: Vec<Track>,
+    pub modified_at: Option<DateTime<Utc>>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardSnapshot {
+    pub root_path: String,
+    pub kind: CardKind,
+    pub writable: bool,
+    pub figures: Vec<Figure>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FabaPlusInfo {
+    total_tracks: Option<u16>,
+    character_dir: Option<String>,
+}
+
+pub fn scan_card(selected_path: &Path) -> Result<CardSnapshot> {
+    if !selected_path.is_dir() {
+        bail!("Le dossier sélectionné n'existe pas ou n'est pas accessible.");
+    }
+
+    let root = discover_content_root(selected_path);
+    let mut figures = Vec::new();
+    let mut saw_plus = false;
+    let mut saw_legacy = false;
+
+    let entries =
+        fs::read_dir(&root).with_context(|| format!("Impossible de lire {}", root.display()))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(folder_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(figure_id) = parse_figure_folder(folder_name) else {
+            continue;
+        };
+
+        let mut tracks = Vec::new();
+        for track_entry in fs::read_dir(&path).into_iter().flatten().flatten() {
+            let track_path = track_entry.path();
+            if !track_path.is_file() {
+                continue;
+            }
+            let Some(file_name) = track_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(index) = parse_track_index(file_name) else {
+                continue;
+            };
+
+            let lower = file_name.to_ascii_lowercase();
+            if lower.ends_with(".faba") {
+                saw_plus = true;
+            } else if lower.ends_with(".mki") || Path::new(file_name).extension().is_none() {
+                saw_legacy = true;
+            } else {
+                continue;
+            }
+
+            let size_bytes = track_entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            tracks.push(Track {
+                index,
+                file_name: file_name.to_owned(),
+                path: path_string(&track_path),
+                label: format!("Piste {}", index + 1),
+                size_bytes,
+            });
+        }
+        tracks.sort_by_key(|track| track.index);
+
+        let info_path = path.join("info");
+        let mut warning = None;
+        if info_path.is_file() {
+            saw_plus = true;
+            match read_plus_info(&info_path) {
+                Ok(info) => {
+                    if info.total_tracks != Some(tracks.len() as u16) {
+                        warning =
+                            Some("Le nombre de pistes ne correspond pas au fichier info.".into());
+                    }
+                    let expected = format!("02190530{figure_id}00");
+                    if info.character_dir.as_deref() != Some(expected.as_str()) {
+                        warning = Some("Le code NFC du fichier info semble incohérent.".into());
+                    }
+                }
+                Err(_) => warning = Some("Le fichier info est illisible.".into()),
+            }
+        }
+
+        let modified_at = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(DateTime::<Utc>::from);
+
+        figures.push(Figure {
+            id: figure_id.clone(),
+            folder_name: folder_name.to_owned(),
+            custom_name: None,
+            path: path_string(&path),
+            nfc_payload: format!("02190530{figure_id}00"),
+            tracks,
+            modified_at,
+            warning,
+        });
+    }
+    figures.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let kind = if saw_plus {
+        CardKind::FabaPlus
+    } else if saw_legacy || root.file_name().and_then(|value| value.to_str()) == Some("MKI01") {
+        CardKind::LegacyFaba
+    } else if figures.is_empty() {
+        CardKind::Empty
+    } else {
+        CardKind::Unknown
+    };
+
+    let mut warnings = Vec::new();
+    if kind == CardKind::LegacyFaba {
+        warnings.push(
+            "Ancien format FABA détecté : consultation uniquement dans cette version.".into(),
+        );
+    }
+    if kind == CardKind::Empty {
+        warnings.push("Aucun contenu FABA+ détecté. Ce dossier peut être initialisé avec votre première figurine.".into());
+    }
+
+    Ok(CardSnapshot {
+        root_path: path_string(&root),
+        kind,
+        writable: !fs::metadata(&root)?.permissions().readonly() && kind != CardKind::LegacyFaba,
+        figures,
+        warnings,
+    })
+}
+
+pub fn discover_content_root(selected_path: &Path) -> PathBuf {
+    if has_figure_folders(selected_path) {
+        return selected_path.to_path_buf();
+    }
+    let legacy = selected_path.join("MKI01");
+    if legacy.is_dir() && has_figure_folders(&legacy) {
+        return legacy;
+    }
+    selected_path.to_path_buf()
+}
+
+pub fn looks_like_card(selected_path: &Path) -> bool {
+    has_figure_folders(selected_path) || has_figure_folders(&selected_path.join("MKI01"))
+}
+
+fn has_figure_folders(path: &Path) -> bool {
+    fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry.path().is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .and_then(parse_figure_folder)
+                    .is_some()
+        })
+}
+
+pub fn write_faba_plus_figure(
+    root: &Path,
+    figure_id: &str,
+    audio_paths: &[PathBuf],
+    backup_root: &Path,
+) -> Result<Option<PathBuf>> {
+    validate_figure_id(figure_id)?;
+    if audio_paths.is_empty() || audio_paths.len() > 99 {
+        bail!("Choisissez entre 1 et 99 fichiers MP3.");
+    }
+    for audio in audio_paths {
+        if !audio.is_file() {
+            bail!("Fichier audio introuvable : {}", audio.display());
+        }
+        let is_mp3 = audio
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("mp3"));
+        if !is_mp3 {
+            bail!("Seuls les fichiers MP3 sont acceptés : {}", audio.display());
+        }
+    }
+    if !root.is_dir() {
+        bail!("Le support FABA+ n'est plus accessible.");
+    }
+
+    let folder_name = format!("K{figure_id}");
+    let destination = root.join(&folder_name);
+    let backup = if destination.exists() {
+        Some(backup_directory(&destination, backup_root, &folder_name)?)
+    } else {
+        None
+    };
+
+    let nonce = unique_nonce();
+    let staging = root.join(format!(".faba-editor-{folder_name}-{nonce}"));
+    fs::create_dir(&staging).context("Impossible de créer le dossier temporaire sur la carte.")?;
+
+    let result = (|| -> Result<()> {
+        for (index, source) in audio_paths.iter().enumerate() {
+            let target = staging.join(format!("CP{index:02}.faba"));
+            fs::copy(source, &target).with_context(|| {
+                format!("Impossible de copier {} vers la carte", source.display())
+            })?;
+        }
+        let info = serde_json::json!({
+            "totalTracks": audio_paths.len(),
+            "characterDir": format!("02190530{figure_id}00")
+        });
+        let mut info_file = fs::File::create(staging.join("info"))?;
+        info_file.write_all(info.to_string().as_bytes())?;
+        info_file.sync_all()?;
+
+        let previous = root.join(format!(".{folder_name}-previous-{nonce}"));
+        if destination.exists() {
+            fs::rename(&destination, &previous)
+                .context("Impossible de préparer le remplacement de la figurine.")?;
+            if let Err(error) = fs::rename(&staging, &destination) {
+                let _ = fs::rename(&previous, &destination);
+                return Err(error)
+                    .context("Le remplacement a échoué ; l'ancienne version a été restaurée.");
+            }
+            fs::remove_dir_all(previous)?;
+        } else {
+            fs::rename(&staging, &destination)
+                .context("Impossible de finaliser l'écriture sur la carte.")?;
+        }
+        Ok(())
+    })();
+
+    if result.is_err() && staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result?;
+    Ok(backup)
+}
+
+pub fn delete_faba_plus_figure(
+    root: &Path,
+    figure_id: &str,
+    backup_root: &Path,
+) -> Result<PathBuf> {
+    validate_figure_id(figure_id)?;
+    let folder_name = format!("K{figure_id}");
+    let destination = root.join(&folder_name);
+    if !destination.is_dir() {
+        bail!("La figurine n'existe plus sur la carte.");
+    }
+    let backup = backup_directory(&destination, backup_root, &folder_name)?;
+    let tombstone = root.join(format!(".{folder_name}-deleted-{}", unique_nonce()));
+    fs::rename(&destination, &tombstone)?;
+    fs::remove_dir_all(&tombstone)?;
+    Ok(backup)
+}
+
+pub fn export_figure(root: &Path, figure_id: &str, destination: &Path) -> Result<PathBuf> {
+    validate_figure_id(figure_id)?;
+    if !destination.is_dir() {
+        bail!("Le dossier d'export n'existe pas.");
+    }
+    let folder_name = format!("K{figure_id}");
+    let source = root.join(&folder_name);
+    if !source.is_dir() {
+        bail!("La figurine n'existe plus sur la carte.");
+    }
+    let target = next_available_path(destination, &folder_name);
+    copy_directory(&source, &target)?;
+    Ok(target)
+}
+
+fn validate_figure_id(figure_id: &str) -> Result<()> {
+    if figure_id.len() != 4
+        || !figure_id.bytes().all(|byte| byte.is_ascii_digit())
+        || figure_id == "0000"
+    {
+        bail!("L'identifiant doit contenir 4 chiffres entre 0001 et 9999.");
+    }
+    Ok(())
+}
+
+fn parse_figure_folder(value: &str) -> Option<String> {
+    (value.len() == 5
+        && value.starts_with('K')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_digit))
+    .then(|| value[1..].to_owned())
+}
+
+fn parse_track_index(value: &str) -> Option<u16> {
+    let rest = value
+        .strip_prefix("CP")
+        .or_else(|| value.strip_prefix("cp"))?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn read_plus_info(path: &Path) -> Result<FabaPlusInfo> {
+    let contents = fs::read_to_string(path)?;
+    serde_json::from_str(&contents).map_err(Into::into)
+}
+
+fn backup_directory(source: &Path, backup_root: &Path, folder_name: &str) -> Result<PathBuf> {
+    fs::create_dir_all(backup_root)?;
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let target = next_available_path(backup_root, &format!("{folder_name}-{timestamp}"));
+    copy_directory(source, &target)?;
+    Ok(target)
+}
+
+fn next_available_path(parent: &Path, base_name: &str) -> PathBuf {
+    let first = parent.join(base_name);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2..10_000 {
+        let candidate = parent.join(format!("{base_name}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{base_name}-{}", unique_nonce()))
+}
+
+fn copy_directory(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_directory(&source_path, &target_path)?;
+        } else if source_path.is_file() {
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn unique_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+pub fn ensure_editable(snapshot: &CardSnapshot) -> Result<()> {
+    match snapshot.kind {
+        CardKind::LegacyFaba => {
+            bail!("Cette carte utilise l'ancien format FABA, disponible en lecture seule.")
+        }
+        CardKind::Unknown => bail!("Le format de cette carte n'est pas reconnu."),
+        _ if !snapshot.writable => bail!("La carte est en lecture seule."),
+        _ => Ok(()),
+    }
+}
+
+pub fn require_figure<'a>(snapshot: &'a CardSnapshot, figure_id: &str) -> Result<&'a Figure> {
+    snapshot
+        .figures
+        .iter()
+        .find(|figure| figure.id == figure_id)
+        .ok_or_else(|| anyhow!("Figurine introuvable sur la carte."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn fake_mp3(path: &Path, contents: &[u8]) {
+        fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn writes_scans_and_backs_up_a_plus_figure() {
+        let card = tempdir().unwrap();
+        let source = tempdir().unwrap();
+        let backups = tempdir().unwrap();
+        fake_mp3(&source.path().join("01.mp3"), b"first");
+        fake_mp3(&source.path().join("02.mp3"), b"second");
+
+        let first_backup = write_faba_plus_figure(
+            card.path(),
+            "0742",
+            &[source.path().join("01.mp3"), source.path().join("02.mp3")],
+            backups.path(),
+        )
+        .unwrap();
+        assert!(first_backup.is_none());
+
+        let snapshot = scan_card(card.path()).unwrap();
+        assert_eq!(snapshot.kind, CardKind::FabaPlus);
+        assert_eq!(snapshot.figures.len(), 1);
+        assert_eq!(snapshot.figures[0].tracks.len(), 2);
+        assert_eq!(
+            fs::read(card.path().join("K0742/CP00.faba")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            fs::read_to_string(card.path().join("K0742/info")).unwrap(),
+            r#"{"characterDir":"02190530074200","totalTracks":2}"#
+        );
+
+        fake_mp3(&source.path().join("03.mp3"), b"replacement");
+        let replacement_backup = write_faba_plus_figure(
+            card.path(),
+            "0742",
+            &[source.path().join("03.mp3")],
+            backups.path(),
+        )
+        .unwrap();
+        assert!(replacement_backup.unwrap().join("CP00.faba").is_file());
+        assert_eq!(
+            fs::read(card.path().join("K0742/CP00.faba")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn discovers_legacy_content_and_keeps_it_read_only() {
+        let card = tempdir().unwrap();
+        fs::create_dir_all(card.path().join("MKI01/K0010")).unwrap();
+        fs::write(card.path().join("MKI01/K0010/CP01.MKI"), b"ciphered").unwrap();
+
+        let snapshot = scan_card(card.path()).unwrap();
+        assert_eq!(snapshot.kind, CardKind::LegacyFaba);
+        assert!(!snapshot.writable);
+        assert_eq!(snapshot.root_path, path_string(&card.path().join("MKI01")));
+    }
+
+    #[test]
+    fn rejects_invalid_ids_and_non_mp3_inputs() {
+        let card = tempdir().unwrap();
+        let source = tempdir().unwrap();
+        let backups = tempdir().unwrap();
+        fs::write(source.path().join("track.wav"), b"wav").unwrap();
+
+        assert!(write_faba_plus_figure(
+            card.path(),
+            "../1",
+            &[source.path().join("track.wav")],
+            backups.path(),
+        )
+        .is_err());
+        assert!(write_faba_plus_figure(
+            card.path(),
+            "1234",
+            &[source.path().join("track.wav")],
+            backups.path(),
+        )
+        .is_err());
+    }
+}
