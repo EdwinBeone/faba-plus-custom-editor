@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 0.4.0
+
+- correction de l'écriture NFC Android : le lecteur reste actif jusqu'à la fin de l'écriture et de la vérification, tout en refusant les callbacks NFC répétés ;
+- ajout d'un éditeur complet de playlist sur Android avec ajout de MP3, retrait de pistes et réordonnancement ;
+- ajout d'un éditeur complet sur PC avec ajout multiple, réordonnancement et conservation des vrais titres des pistes ;
+- glisser-déposer direct de MP3 sur une playlist existante pour les ajouter à celle-ci ;
+- nouvelle icône originale et cohérente pour Android, Windows, macOS et Linux, également affichée dans l'interface desktop.
+
 ## 0.3.0
 
 - la bibliothèque locale devient l'espace de travail principal, même sans carte SD et sans connexion cloud ;

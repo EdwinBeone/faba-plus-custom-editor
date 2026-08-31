@@ -24,11 +24,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -59,6 +61,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 
 class MainActivity : ComponentActivity() {
@@ -81,11 +84,19 @@ class MainActivity : ComponentActivity() {
 
     private val audioPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@registerForActivityResult
-        if (uris.size > 99) {
+        val target = pickerTarget
+        val existingTracks = target?.tracks?.map { track ->
+            DraftTrack(
+                label = track.label,
+                sourcePosition = track.position,
+                uri = null,
+                audioAvailable = track.audioAvailable,
+            )
+        }.orEmpty()
+        if (existingTracks.size + uris.size > 99) {
             statusMessage = "Une playlist est limitée à 99 pistes."
             return@registerForActivityResult
         }
-        val target = pickerTarget
         val suggestedId = target?.figureId ?: nextAvailableId()
         if (suggestedId == null) {
             statusMessage = "Aucun identifiant personnalisé libre entre 2000 et 8999."
@@ -94,9 +105,24 @@ class MainActivity : ComponentActivity() {
         importDraft = ImportDraft(
             figureId = suggestedId,
             name = target?.name ?: "Ma playlist",
-            uris = uris,
-            labels = uris.map(::displayName),
-            replacing = target != null,
+            tracks = existingTracks + uris.map { uri ->
+                DraftTrack(displayName(uri), sourcePosition = null, uri = uri, audioAvailable = true)
+            },
+            editing = target != null,
+        )
+    }
+
+    private val additionalAudioPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val draft = importDraft ?: return@registerForActivityResult
+        if (uris.isEmpty()) return@registerForActivityResult
+        if (draft.tracks.size + uris.size > 99) {
+            statusMessage = "Une playlist est limitée à 99 pistes."
+            return@registerForActivityResult
+        }
+        importDraft = draft.copy(
+            tracks = draft.tracks + uris.map { uri ->
+                DraftTrack(displayName(uri), sourcePosition = null, uri = uri, audioAvailable = true)
+            },
         )
     }
 
@@ -123,6 +149,8 @@ class MainActivity : ComponentActivity() {
                     onImport = ::pickAudio,
                     onImportDraftChange = { importDraft = it },
                     onImportConfirm = ::uploadDraft,
+                    onEdit = ::editPlaylist,
+                    onAddToDraft = ::pickAdditionalAudio,
                     onRename = { renameTarget = it },
                     onRenameDismiss = { renameTarget = null },
                     onRenameConfirm = ::renamePlaylist,
@@ -202,6 +230,26 @@ class MainActivity : ComponentActivity() {
         audioPicker.launch(arrayOf("audio/mpeg", "audio/mp3"))
     }
 
+    private fun editPlaylist(playlist: CloudPlaylist) {
+        importDraft = ImportDraft(
+            figureId = playlist.figureId,
+            name = playlist.name,
+            tracks = playlist.tracks.map { track ->
+                DraftTrack(
+                    label = track.label,
+                    sourcePosition = track.position,
+                    uri = null,
+                    audioAvailable = track.audioAvailable,
+                )
+            },
+            editing = true,
+        )
+    }
+
+    private fun pickAdditionalAudio() {
+        additionalAudioPicker.launch(arrayOf("audio/mpeg", "audio/mp3"))
+    }
+
     private fun uploadDraft(draft: ImportDraft) {
         val current = session ?: return
         if (!Regex("^[2-8][0-9]{3}$").matches(draft.figureId)) {
@@ -212,16 +260,43 @@ class MainActivity : ComponentActivity() {
             statusMessage = "Donnez un nom à la playlist."
             return
         }
+        if (draft.tracks.isEmpty() || draft.tracks.size > 99) {
+            statusMessage = "Une playlist doit contenir entre 1 et 99 pistes."
+            return
+        }
+        if (draft.tracks.any { it.uri == null && !it.audioAvailable }) {
+            statusMessage = "Une piste conservée n'a pas de fichier audio dans le cloud. Supprimez-la ou ajoutez son MP3."
+            return
+        }
         loading = true
-        statusMessage = "Envoi de ${draft.uris.size} piste(s)…"
+        statusMessage = "Synchronisation de ${draft.tracks.size} piste(s)…"
         lifecycleScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    api.savePlaylist(current.token, draft.figureId, draft.name, draft.labels, resetAudio = true)
-                    draft.uris.forEachIndexed { position, uri ->
-                        val input = contentResolver.openInputStream(uri)
-                            ?: throw IOException("Impossible de lire ${draft.labels[position]}.")
-                        api.uploadAudio(current.token, draft.figureId, position, input)
+                    val temporaryDirectory = File(cacheDir, "playlist-edit-${System.nanoTime()}")
+                    try {
+                        temporaryDirectory.mkdirs()
+                        val downloaded = mutableMapOf<Int, File>()
+                        draft.tracks.mapNotNull { it.sourcePosition }.distinct().forEach { sourcePosition ->
+                            val destination = File(temporaryDirectory, "$sourcePosition.mp3")
+                            api.downloadAudio(current.token, draft.figureId, sourcePosition, destination)
+                            downloaded[sourcePosition] = destination
+                        }
+                        api.savePlaylist(
+                            current.token,
+                            draft.figureId,
+                            draft.name,
+                            draft.tracks.map { it.label },
+                            resetAudio = true,
+                        )
+                        draft.tracks.forEachIndexed { position, track ->
+                            val input = track.uri?.let(contentResolver::openInputStream)
+                                ?: track.sourcePosition?.let { downloaded[it]?.inputStream() }
+                                ?: throw IOException("Impossible de lire ${track.label}.")
+                            api.uploadAudio(current.token, draft.figureId, position, input)
+                        }
+                    } finally {
+                        temporaryDirectory.deleteRecursively()
                     }
                     api.library(current.token)
                 }
@@ -303,10 +378,11 @@ class MainActivity : ComponentActivity() {
     private fun handleTag(tag: Tag) {
         if (!nfcWriteGate.tryConsume()) return
         val playlist = pendingNfc ?: return
-        // Stop reader mode before doing I/O so Android cannot queue the same tag again.
-        nfcAdapter?.disableReaderMode(this)
+        // Keep the tag handle alive until NDEF write + verification are complete.
+        // The consumed gate already rejects duplicate callbacks for the same nearby tag.
         val result = writeNdef(tag, playlist.nfcPayload)
         runOnUiThread {
+            nfcAdapter?.disableReaderMode(this)
             pendingNfc = null
             nfcResult = if (result.success) {
                 "Tag prêt pour « ${playlist.name} » (K${playlist.figureId})."
@@ -374,9 +450,15 @@ class MainActivity : ComponentActivity() {
 data class ImportDraft(
     val figureId: String,
     val name: String,
-    val uris: List<Uri>,
-    val labels: List<String>,
-    val replacing: Boolean,
+    val tracks: List<DraftTrack>,
+    val editing: Boolean,
+)
+
+data class DraftTrack(
+    val label: String,
+    val sourcePosition: Int?,
+    val uri: Uri?,
+    val audioAvailable: Boolean,
 )
 
 private data class NfcWriteResult(val success: Boolean, val message: String)
@@ -398,6 +480,8 @@ private fun FabaApp(
     onImport: (CloudPlaylist?) -> Unit,
     onImportDraftChange: (ImportDraft?) -> Unit,
     onImportConfirm: (ImportDraft) -> Unit,
+    onEdit: (CloudPlaylist) -> Unit,
+    onAddToDraft: () -> Unit,
     onRename: (CloudPlaylist) -> Unit,
     onRenameDismiss: () -> Unit,
     onRenameConfirm: (CloudPlaylist, String) -> Unit,
@@ -414,12 +498,12 @@ private fun FabaApp(
             if (session == null) {
                 AuthScreen(loading, statusMessage, onAuthenticate, onDismissStatus)
             } else {
-                LibraryScreen(session, library, loading, statusMessage, onRefresh, onLogout, onImport, onRename, onDelete, onArmNfc, onDismissStatus)
+                LibraryScreen(session, library, loading, statusMessage, onRefresh, onLogout, onImport, onEdit, onRename, onDelete, onArmNfc, onDismissStatus)
             }
         }
     }
     importDraft?.let { draft ->
-        ImportDialog(draft, loading, onImportDraftChange, onImportConfirm)
+        ImportDialog(draft, loading, onImportDraftChange, onImportConfirm, onAddToDraft)
     }
     renameTarget?.let { playlist ->
         NameDialog("Renommer la playlist", playlist.name, onRenameDismiss) { onRenameConfirm(playlist, it) }
@@ -498,6 +582,7 @@ private fun LibraryScreen(
     onRefresh: () -> Unit,
     onLogout: () -> Unit,
     onImport: (CloudPlaylist?) -> Unit,
+    onEdit: (CloudPlaylist) -> Unit,
     onRename: (CloudPlaylist) -> Unit,
     onDelete: (CloudPlaylist) -> Unit,
     onArmNfc: (CloudPlaylist) -> Unit,
@@ -535,7 +620,7 @@ private fun LibraryScreen(
                     item { EmptyLibrary() }
                 } else {
                     items(library.playlists, key = { it.figureId }) { playlist ->
-                        PlaylistCard(playlist, loading, onImport, onRename, onDelete, onArmNfc)
+                        PlaylistCard(playlist, loading, onEdit, onRename, onDelete, onArmNfc)
                     }
                 }
             }
@@ -553,7 +638,7 @@ private fun LibraryScreen(
 private fun PlaylistCard(
     playlist: CloudPlaylist,
     loading: Boolean,
-    onImport: (CloudPlaylist?) -> Unit,
+    onEdit: (CloudPlaylist) -> Unit,
     onRename: (CloudPlaylist) -> Unit,
     onDelete: (CloudPlaylist) -> Unit,
     onArmNfc: (CloudPlaylist) -> Unit,
@@ -582,7 +667,7 @@ private fun PlaylistCard(
             HorizontalDivider(color = Color(0xFFEEEAF3))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { onArmNfc(playlist) }, enabled = complete && !loading, modifier = Modifier.weight(1f)) { Text("Écrire le tag NFC") }
-                OutlinedButton(onClick = { onImport(playlist) }, enabled = !loading) { Text("Remplacer") }
+                OutlinedButton(onClick = { onEdit(playlist) }, enabled = !loading) { Text("Modifier") }
                 TextButton(onClick = { onDelete(playlist) }, enabled = !loading) { Text("Supprimer", color = MaterialTheme.colorScheme.error) }
             }
         }
@@ -604,21 +689,57 @@ private fun ImportDialog(
     loading: Boolean,
     onChange: (ImportDraft?) -> Unit,
     onConfirm: (ImportDraft) -> Unit,
+    onAddTracks: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = { if (!loading) onChange(null) },
-        title = { Text(if (draft.replacing) "Remplacer les musiques" else "Nouvelle playlist") },
+        title = { Text(if (draft.editing) "Modifier la playlist" else "Nouvelle playlist") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(draft.name, { onChange(draft.copy(name = it)) }, label = { Text("Nom") }, singleLine = true)
-                OutlinedTextField(draft.figureId, { if (!draft.replacing) onChange(draft.copy(figureId = it.filter(Char::isDigit).take(4))) }, label = { Text("ID FABA+ (2000–8999)") }, enabled = !draft.replacing, singleLine = true)
-                Text("${draft.uris.size} MP3 sélectionné(s). L'ordre choisi par Android sera l'ordre de lecture.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                draft.labels.take(5).forEachIndexed { index, label -> Text("${index + 1}. $label", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp) }
+                OutlinedTextField(draft.figureId, { if (!draft.editing) onChange(draft.copy(figureId = it.filter(Char::isDigit).take(4))) }, label = { Text("ID FABA+ (2000–8999)") }, enabled = !draft.editing, singleLine = true)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("${draft.tracks.size} piste(s) · ordre de lecture", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    TextButton(onClick = onAddTracks, enabled = !loading && draft.tracks.size < 99) { Text("＋ Ajouter") }
+                }
+                LazyColumn(Modifier.heightIn(max = 300.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    itemsIndexed(draft.tracks) { index, track ->
+                        Surface(color = Color(0xFFF7F5FA), shape = RoundedCornerShape(10.dp)) {
+                            Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(String.format("%02d", index + 1), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                Text(track.label, Modifier.padding(horizontal = 8.dp).weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
+                                TextButton(
+                                    onClick = { onChange(draft.copy(tracks = draft.tracks.moved(index, index - 1))) },
+                                    enabled = !loading && index > 0,
+                                    contentPadding = PaddingValues(6.dp),
+                                ) { Text("↑") }
+                                TextButton(
+                                    onClick = { onChange(draft.copy(tracks = draft.tracks.moved(index, index + 1))) },
+                                    enabled = !loading && index < draft.tracks.lastIndex,
+                                    contentPadding = PaddingValues(6.dp),
+                                ) { Text("↓") }
+                                TextButton(
+                                    onClick = { onChange(draft.copy(tracks = draft.tracks.filterIndexed { trackIndex, _ -> trackIndex != index })) },
+                                    enabled = !loading,
+                                    contentPadding = PaddingValues(6.dp),
+                                ) { Text("×", color = MaterialTheme.colorScheme.error) }
+                            }
+                        }
+                    }
+                }
             }
         },
-        confirmButton = { Button(onClick = { onConfirm(draft) }, enabled = !loading) { Text(if (loading) "Envoi…" else "Synchroniser") } },
+        confirmButton = { Button(onClick = { onConfirm(draft) }, enabled = !loading && draft.tracks.isNotEmpty()) { Text(if (loading) "Envoi…" else "Enregistrer") } },
         dismissButton = { TextButton(onClick = { onChange(null) }, enabled = !loading) { Text("Annuler") } },
     )
+}
+
+private fun <T> List<T>.moved(from: Int, to: Int): List<T> {
+    if (from !in indices || to !in indices || from == to) return this
+    return toMutableList().also { values ->
+        val value = values.removeAt(from)
+        values.add(to, value)
+    }
 }
 
 @Composable

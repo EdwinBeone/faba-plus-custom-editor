@@ -11,8 +11,8 @@ android {
         applicationId = "be.edwin.fabatag"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.3.0"
+        versionCode = 3
+        versionName = "0.4.0"
 
         buildConfigField("String", "FABA_API_BASE_URL", "\"https://faba.bo1.be/api/v1/\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -188,7 +188,15 @@ pub async fn import_batch(
                 let figure_id = next_available_id(&used_ids)?;
                 used_ids.insert(figure_id.clone());
                 let name = file_stem(&path);
-                save_local_playlist(database, library_root, &owner, &figure_id, &name, &[path])?;
+                save_local_playlist(
+                    database,
+                    library_root,
+                    &owner,
+                    &figure_id,
+                    &name,
+                    &[path],
+                    None,
+                )?;
             }
         }
         "singlePlaylist" => {
@@ -200,7 +208,15 @@ pub async fn import_batch(
                 bail!("Donnez un nom à la playlist qui regroupe les sons.");
             }
             let figure_id = next_available_id(&used_ids)?;
-            save_local_playlist(database, library_root, &owner, &figure_id, &name, &paths)?;
+            save_local_playlist(
+                database,
+                library_root,
+                &owner,
+                &figure_id,
+                &name,
+                &paths,
+                None,
+            )?;
         }
         _ => bail!("Mode d'import en lot inconnu."),
     }
@@ -212,6 +228,7 @@ pub async fn replace_playlist(
     library_root: &Path,
     figure_id: &str,
     audio_paths: Vec<String>,
+    track_labels: Option<Vec<String>>,
 ) -> Result<ManagedLibrary> {
     validate_figure_id(figure_id)?;
     let paths = audio_paths
@@ -219,6 +236,12 @@ pub async fn replace_playlist(
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     validate_audio_paths(&paths, 99)?;
+    if track_labels
+        .as_ref()
+        .is_some_and(|labels| labels.len() != paths.len())
+    {
+        bail!("Chaque fichier audio doit avoir un titre correspondant.");
+    }
     let owner = database.active_library_owner()?;
     let existing = database
         .managed_playlists(&owner, false)?
@@ -232,6 +255,7 @@ pub async fn replace_playlist(
         figure_id,
         &existing.name,
         &paths,
+        track_labels.as_deref(),
     )?;
     synchronize(database, library_root).await
 }
@@ -500,6 +524,7 @@ fn save_local_playlist(
     figure_id: &str,
     name: &str,
     paths: &[PathBuf],
+    track_labels: Option<&[String]>,
 ) -> Result<()> {
     validate_figure_id(figure_id)?;
     validate_audio_paths(paths, 99)?;
@@ -519,7 +544,10 @@ fn save_local_playlist(
             })?;
             tracks.push(ManagedTrackRecord {
                 position: position as u16,
-                label: file_stem(source),
+                label: track_labels
+                    .and_then(|labels| labels.get(position))
+                    .map(|label| normalize_track_label(label, position as u16))
+                    .unwrap_or_else(|| file_stem(source)),
                 audio_size_bytes: fs::metadata(&target)?.len(),
                 audio_sha256: sha256_file(&target)?,
             });
@@ -677,6 +705,7 @@ mod tests {
             "2000",
             "Une histoire",
             &[first],
+            None,
         )
         .unwrap();
         let used = database
@@ -694,6 +723,7 @@ mod tests {
             "2001",
             "Une chanson",
             &[second],
+            None,
         )
         .unwrap();
         let library = cached_library(&database, &temp.path().join("audio"), true, None).unwrap();
@@ -720,6 +750,30 @@ mod tests {
     }
 
     #[test]
+    fn playlist_edit_preserves_explicit_track_labels() {
+        let temp = tempdir().unwrap();
+        let database = LibraryDatabase::new(temp.path().join("library.sqlite3"));
+        database.initialize().unwrap();
+        let audio = temp.path().join("00.mp3");
+        fs::write(&audio, b"ID3-audio").unwrap();
+        let labels = vec!["Le vrai titre".to_owned()];
+
+        save_local_playlist(
+            &database,
+            &temp.path().join("audio"),
+            "local",
+            "2000",
+            "Histoires",
+            &[audio],
+            Some(&labels),
+        )
+        .unwrap();
+
+        let library = cached_library(&database, &temp.path().join("audio"), true, None).unwrap();
+        assert_eq!(library.playlists[0].tracks[0].label, "Le vrai titre");
+    }
+
+    #[test]
     fn library_write_overwrites_matching_ids_and_preserves_card_extras() {
         let temp = tempdir().unwrap();
         let database = LibraryDatabase::new(temp.path().join("library.sqlite3"));
@@ -734,6 +788,7 @@ mod tests {
             "2000",
             "Nouvelle version",
             &[audio],
+            None,
         )
         .unwrap();
 

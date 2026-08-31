@@ -528,6 +528,7 @@ pub async fn library_import_batch(
 pub async fn library_replace_playlist(
     figure_id: String,
     audio_paths: Vec<String>,
+    track_labels: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<ManagedLibrary, String> {
     state.diagnostics.info(
@@ -539,6 +540,7 @@ pub async fn library_replace_playlist(
         &state.library_root,
         &figure_id,
         audio_paths,
+        track_labels,
     )
     .await
     .map_err(|error| logged_error(&state.diagnostics, "library.replace.error", error))?;

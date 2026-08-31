@@ -1,6 +1,7 @@
 package be.edwin.fabatag
 
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -77,6 +78,38 @@ class ApiClient(private val baseUrl: String = BuildConfig.FABA_API_BASE_URL) {
             throw error
         } catch (error: Exception) {
             throw IOException("Envoi du MP3 vers FABA Cloud impossible.", error)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun downloadAudio(
+        token: String,
+        figureId: String,
+        position: Int,
+        destination: File,
+    ) {
+        val connection = URL(baseUrl + "library/playlists/$figureId/tracks/$position/audio")
+            .openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10 * 60_000
+            connection.setRequestProperty("Accept", "audio/mpeg")
+            connection.setRequestProperty("Authorization", "Bearer $token")
+            connection.setRequestProperty("User-Agent", "FABA-Tag-Android/${BuildConfig.VERSION_NAME}")
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                val text = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                throw ApiException(status, errorMessage(status, text))
+            }
+            destination.outputStream().buffered().use { output ->
+                connection.inputStream.use { input -> input.copyTo(output, 64 * 1024) }
+            }
+        } catch (error: ApiException) {
+            throw error
+        } catch (error: Exception) {
+            throw IOException("Téléchargement d'une piste depuis FABA Cloud impossible.", error)
         } finally {
             connection.disconnect()
         }

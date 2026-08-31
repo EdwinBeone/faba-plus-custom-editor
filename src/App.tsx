@@ -34,7 +34,8 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import appIconUrl from "../assets/app-icon-ui.png";
 import "./App.css";
 
 type CardKind = "fabaPlus" | "legacyFaba" | "empty" | "unknown";
@@ -133,6 +134,7 @@ type CloudLibrary = {
 };
 
 type BatchImport = { paths: string[] };
+type PlaylistEdit = { figureId: string; addedPaths: string[] };
 
 type Toast = { tone: "success" | "error" | "info"; message: string };
 
@@ -193,7 +195,9 @@ function App() {
   const [cloudLibrary, setCloudLibrary] = useState<CloudLibrary | null>(null);
   const [cloudBusy, setCloudBusy] = useState(false);
   const [batchImport, setBatchImport] = useState<BatchImport | null>(null);
+  const [playlistEdit, setPlaylistEdit] = useState<PlaylistEdit | null>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
+  const [dropPlaylistId, setDropPlaylistId] = useState<string | null>(null);
 
   const refreshSources = async () => {
     setSourceBusy(true);
@@ -253,29 +257,46 @@ function App() {
     if (!("__TAURI_INTERNALS__" in window)) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
-    void getCurrentWindow().onDragDropEvent((event) => {
-      if (event.payload.type === "enter" || event.payload.type === "over") {
-        setDraggingFiles(true);
-      } else if (event.payload.type === "leave") {
-        setDraggingFiles(false);
-      } else if (event.payload.type === "drop") {
-        setDraggingFiles(false);
-        const paths = event.payload.paths.filter(isMp3Path);
-        if (paths.length === 0) {
-          showToast("error", "Déposez uniquement des fichiers MP3.");
-        } else {
-          setBatchImport({ paths });
+    void (async () => {
+      const appWindow = getCurrentWindow();
+      const scaleFactor = await appWindow.scaleFactor();
+      const stop = await appWindow.onDragDropEvent((event) => {
+        const payload = event.payload;
+        const targetId = payload.type === "leave"
+          ? null
+          : document
+              .elementFromPoint(payload.position.x / scaleFactor, payload.position.y / scaleFactor)
+              ?.closest<HTMLElement>("[data-playlist-id]")
+              ?.dataset.playlistId ?? null;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDraggingFiles(true);
+          setDropPlaylistId(playlistEdit?.figureId ?? targetId);
+        } else if (payload.type === "leave") {
+          setDraggingFiles(false);
+          setDropPlaylistId(null);
+        } else if (payload.type === "drop") {
+          setDraggingFiles(false);
+          setDropPlaylistId(null);
+          const paths = payload.paths.filter(isMp3Path);
+          if (paths.length === 0) {
+            showToast("error", "Déposez uniquement des fichiers MP3.");
+          } else if (playlistEdit) {
+            setPlaylistEdit((current) => current && ({ ...current, addedPaths: [...current.addedPaths, ...paths] }));
+          } else if (targetId) {
+            setPlaylistEdit({ figureId: targetId, addedPaths: paths });
+          } else {
+            setBatchImport({ paths });
+          }
         }
-      }
-    }).then((stop) => {
+      });
       if (cancelled) stop();
       else unlisten = stop;
-    });
+    })();
     return () => {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [playlistEdit?.figureId]);
 
   useEffect(() => {
     if (!toast) return;
@@ -488,28 +509,8 @@ function App() {
     }
   };
 
-  const replaceLibraryPlaylist = async (playlist: CloudPlaylist) => {
-    const selected = await open({
-      multiple: true,
-      filters: [{ name: "Fichiers MP3", extensions: ["mp3"] }],
-      title: `Remplacer les sons de ${playlist.name}`,
-    });
-    const audioPaths = typeof selected === "string" ? [selected] : selected;
-    if (!audioPaths?.length) return;
-    setCloudBusy(true);
-    try {
-      applyLibrary(
-        await invoke<CloudLibrary>("library_replace_playlist", {
-          figureId: playlist.figureId,
-          audioPaths,
-        }),
-        "Sons remplacés dans la bibliothèque.",
-      );
-    } catch (error) {
-      showToast("error", stringifyError(error));
-    } finally {
-      setCloudBusy(false);
-    }
+  const editLibraryPlaylist = (playlist: CloudPlaylist) => {
+    setPlaylistEdit({ figureId: playlist.figureId, addedPaths: [] });
   };
 
   const deleteLibraryPlaylist = async (playlist: CloudPlaylist) => {
@@ -564,10 +565,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true">
-            <Disc3 size={24} />
-            <Sparkles className="brand-spark" size={12} />
-          </div>
+          <div className="brand-mark" aria-hidden="true"><img src={appIconUrl} alt="" /></div>
           <div>
             <strong>FABA+</strong>
             <span>Custom Editor</span>
@@ -691,7 +689,7 @@ function App() {
                 onSync={() => refreshCloud(true)}
                 onAdd={pickBatchAudio}
                 onRename={renameLibraryPlaylist}
-                onReplace={replaceLibraryPlaylist}
+                onEdit={editLibraryPlaylist}
                 onDelete={deleteLibraryPlaylist}
                 busy={cloudBusy || busy}
               />
@@ -737,7 +735,7 @@ function App() {
                 onSync={() => refreshCloud(true)}
                 onAdd={pickBatchAudio}
                 onRename={renameLibraryPlaylist}
-                onReplace={replaceLibraryPlaylist}
+                onEdit={editLibraryPlaylist}
                 onDelete={deleteLibraryPlaylist}
                 onImport={importCloudPlaylist}
                 onSyncCard={syncLibraryToCard}
@@ -860,7 +858,7 @@ function App() {
       </main>
 
       {busy && <div className="busy-overlay" aria-live="polite"><LoaderCircle className="spin" size={34} /><span>Opération en cours…</span></div>}
-      {draggingFiles && <div className="drop-overlay" aria-live="polite"><Upload size={40} /><strong>Déposez vos MP3</strong><span>Ils seront ajoutés à la bibliothèque locale.</span></div>}
+      {draggingFiles && <div className="drop-overlay" aria-live="polite"><Upload size={40} /><strong>{dropPlaylistId ? `Ajouter à K${dropPlaylistId}` : "Déposez vos MP3"}</strong><span>{dropPlaylistId ? "Les fichiers seront ajoutés à cette playlist avant validation." : "Ils seront ajoutés à la bibliothèque locale."}</span></div>}
       {toast && (
         <div className={`toast ${toast.tone}`} role="status">
           {toast.tone === "success" ? <Check size={18} /> : toast.tone === "error" ? <AlertTriangle size={18} /> : <CircleHelp size={18} />}
@@ -890,6 +888,19 @@ function App() {
           onImported={(library) => {
             setBatchImport(null);
             applyLibrary(library, "Import terminé.");
+          }}
+          onNotify={showToast}
+        />
+      )}
+
+      {playlistEdit && cloudLibrary?.playlists.find((playlist) => playlist.figureId === playlistEdit.figureId) && (
+        <PlaylistEditorModal
+          playlist={cloudLibrary.playlists.find((playlist) => playlist.figureId === playlistEdit.figureId)!}
+          addedPaths={playlistEdit.addedPaths}
+          onClose={() => setPlaylistEdit(null)}
+          onSaved={(library) => {
+            setPlaylistEdit(null);
+            applyLibrary(library, "Playlist mise à jour.");
           }}
           onNotify={showToast}
         />
@@ -1099,12 +1110,162 @@ function BatchImportModal({
   );
 }
 
+type PlaylistEditorTrack = {
+  key: string;
+  label: string;
+  path: string | null;
+  added: boolean;
+};
+
+function PlaylistEditorModal({
+  playlist,
+  addedPaths,
+  onClose,
+  onSaved,
+  onNotify,
+}: {
+  playlist: CloudPlaylist;
+  addedPaths: string[];
+  onClose: () => void;
+  onSaved: (library: CloudLibrary) => void;
+  onNotify: (tone: Toast["tone"], message: string) => void;
+}) {
+  const [tracks, setTracks] = useState<PlaylistEditorTrack[]>(() => [
+    ...playlist.tracks.map((track) => ({
+      key: `existing-${track.position}`,
+      label: track.label,
+      path: track.localPath,
+      added: false,
+    })),
+    ...addedPaths.map((path, index) => ({
+      key: `dropped-${index}-${path}`,
+      label: fileNameWithoutExtension(path),
+      path,
+      added: true,
+    })),
+  ]);
+  const handledDropCount = useRef(addedPaths.length);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const pending = addedPaths.slice(handledDropCount.current);
+    handledDropCount.current = addedPaths.length;
+    if (pending.length === 0) return;
+    if (tracks.length + pending.length > 99) {
+      onNotify("error", "Une playlist est limitée à 99 pistes.");
+      return;
+    }
+    setTracks((current) => [
+      ...current,
+      ...pending.map((path, index) => ({
+        key: `dropped-${handledDropCount.current}-${index}-${path}`,
+        label: fileNameWithoutExtension(path),
+        path,
+        added: true,
+      })),
+    ]);
+  }, [addedPaths]);
+
+  const pickMore = async () => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "Fichiers MP3", extensions: ["mp3"] }],
+      title: `Ajouter des sons à ${playlist.name}`,
+    });
+    const paths = typeof selected === "string" ? [selected] : selected;
+    if (!paths?.length) return;
+    if (tracks.length + paths.length > 99) {
+      onNotify("error", "Une playlist est limitée à 99 pistes.");
+      return;
+    }
+    setTracks((current) => [
+      ...current,
+      ...paths.map((path, index) => ({
+        key: `picked-${Date.now()}-${index}-${path}`,
+        label: fileNameWithoutExtension(path),
+        path,
+        added: true,
+      })),
+    ]);
+  };
+
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= tracks.length) return;
+    setTracks((current) => {
+      const next = [...current];
+      const [track] = next.splice(from, 1);
+      next.splice(to, 0, track);
+      return next;
+    });
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (tracks.length === 0) {
+      onNotify("error", "Une playlist doit conserver au moins une piste.");
+      return;
+    }
+    if (tracks.length > 99) {
+      onNotify("error", "Une playlist est limitée à 99 pistes.");
+      return;
+    }
+    if (tracks.some((track) => !track.path)) {
+      onNotify("error", "Supprimez les pistes absentes du cache ou resynchronisez le cloud avant d'enregistrer.");
+      return;
+    }
+    setLoading(true);
+    try {
+      onSaved(await invoke<CloudLibrary>("library_replace_playlist", {
+        figureId: playlist.figureId,
+        audioPaths: tracks.map((track) => track.path!),
+        trackLabels: tracks.map((track) => track.label),
+      }));
+    } catch (error) {
+      onNotify("error", stringifyError(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !loading && onClose()}>
+      <form className="modal playlist-editor-modal" role="dialog" aria-modal="true" aria-labelledby="playlist-editor-title" onSubmit={save}>
+        <div className="modal-header">
+          <div><span className="modal-icon"><Music2 size={20} /></span><div><p>K{playlist.figureId} · édition complète</p><h2 id="playlist-editor-title">{playlist.name}</h2></div></div>
+          <button className="icon-button" type="button" onClick={onClose} disabled={loading} aria-label="Fermer"><X size={19} /></button>
+        </div>
+        <div className="playlist-editor-body">
+          <button className="playlist-add-zone" type="button" onClick={pickMore} disabled={loading || tracks.length >= 99}>
+            <Plus size={20} /><span><strong>Ajouter des fichiers MP3</strong><small>ou déposez-les directement dans cette fenêtre</small></span>
+          </button>
+          <div className="playlist-editor-list">
+            {tracks.map((track, index) => (
+              <div key={track.key} className={!track.path ? "missing" : ""}>
+                <span className="playlist-track-index">{String(index + 1).padStart(2, "0")}</span>
+                <span className="playlist-track-copy"><strong>{track.label}</strong><small>{track.path ? (track.added ? "Nouveau fichier" : lastPathPart(track.path)) : "Audio absent du cache local"}</small></span>
+                <button type="button" onClick={() => move(index, index - 1)} disabled={loading || index === 0} title="Monter"><ArrowUp size={14} /></button>
+                <button type="button" onClick={() => move(index, index + 1)} disabled={loading || index === tracks.length - 1} title="Descendre"><ArrowDown size={14} /></button>
+                <button type="button" className="remove-track" onClick={() => setTracks((current) => current.filter((_, trackIndex) => trackIndex !== index))} disabled={loading} title="Retirer"><Trash2 size={14} /></button>
+              </div>
+            ))}
+          </div>
+          <p className="batch-hint"><Database size={15} /> L'ordre affiché sera l'ordre de lecture sur FABA+, Android et la carte SD.</p>
+        </div>
+        <div className="modal-footer">
+          <span><Music2 size={16} /> {tracks.length}/99 piste{tracks.length > 1 ? "s" : ""}</span>
+          <div><button className="button secondary" type="button" onClick={onClose} disabled={loading}>Annuler</button><button className="button primary" type="submit" disabled={loading || tracks.length === 0}>{loading ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} Enregistrer l'ordre</button></div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function CloudLibraryPanel({
   library,
   onSync,
   onAdd,
   onRename,
-  onReplace,
+  onEdit,
   onDelete,
   onImport,
   onSyncCard,
@@ -1115,7 +1276,7 @@ function CloudLibraryPanel({
   onSync: () => Promise<unknown>;
   onAdd: () => Promise<void>;
   onRename: (playlist: CloudPlaylist) => Promise<void>;
-  onReplace: (playlist: CloudPlaylist) => Promise<void>;
+  onEdit: (playlist: CloudPlaylist) => void;
   onDelete: (playlist: CloudPlaylist) => Promise<void>;
   onImport?: (playlist: CloudPlaylist) => Promise<void>;
   onSyncCard?: () => Promise<void>;
@@ -1141,12 +1302,12 @@ function CloudLibraryPanel({
       ) : (
         <div className="cloud-playlist-grid">
           {library.playlists.map((playlist) => (
-            <article key={playlist.figureId}>
+            <article key={playlist.figureId} data-playlist-id={playlist.figureId}>
               <span className={`figure-art art-${Number(playlist.figureId) % 6}`}><Music2 size={24} /><small>K{playlist.figureId}</small></span>
               <div className="cloud-playlist-copy"><strong>{playlist.name}</strong><small>{playlist.trackCount} piste{playlist.trackCount > 1 ? "s" : ""} · {playlist.tracks.every((track) => track.audioAvailable) ? "audio local complet" : "audio incomplet"}</small>{playlist.pendingSync && <em>En attente de cloud</em>}</div>
               <div className="cloud-playlist-tools">
                 <button className="icon-button" type="button" onClick={() => void onRename(playlist)} disabled={busy} title="Renommer"><Pencil size={14} /></button>
-                <button className="icon-button" type="button" onClick={() => void onReplace(playlist)} disabled={busy} title="Remplacer les sons"><RotateCcw size={14} /></button>
+                <button className="icon-button" type="button" onClick={() => onEdit(playlist)} disabled={busy} title="Modifier les pistes"><Music2 size={14} /></button>
                 <button className="icon-button danger-icon" type="button" onClick={() => void onDelete(playlist)} disabled={busy} title="Supprimer"><Trash2 size={14} /></button>
               </div>
               <div className="managed-track-list">
