@@ -9,7 +9,7 @@ publish = false
 anyhow = "1"
 argon2 = "0.6.0"
 axum = "0.8.9"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
