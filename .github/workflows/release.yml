@@ -39,16 +39,18 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: v__VERSION__
           releaseName: FABA+ Custom Editor v__VERSION__
           releaseBody: |
             Version publique de FABA+ Custom Editor. Consultez le CHANGELOG du dépôt pour le détail des changements.
 
-            Téléchargez l'installateur adapté à votre système dans la liste des fichiers ci-dessous. Ces binaires communautaires ne sont pas encore signés.
+            Téléchargez l'installateur adapté à votre système dans la liste des fichiers ci-dessous. Les mises à jour intégrées sont authentifiées par signature Tauri ; les installateurs restent des binaires communautaires non signés par un certificat Windows/macOS.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

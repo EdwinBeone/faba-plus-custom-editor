@@ -1,5 +1,14 @@
 # Journal des versions
 
+## 0.5.0
+
+- ajout de l'auto-update signé Tauri sur Windows, macOS et Linux, directement depuis la dernière release GitHub ;
+- vérification automatique au démarrage, recherche manuelle, notes de version, progression de téléchargement et redémarrage après installation sur PC ;
+- ajout de la recherche de mise à jour Android depuis GitHub avec téléchargement de l'APK signé existant ;
+- contrôle strict du nom de l'asset, de l'URL de release, de la taille et de l'empreinte SHA-256 de l'APK avant de demander son installation ;
+- parcours guidé vers l'autorisation Android « installer des applications inconnues », nécessaire uniquement la première fois ;
+- génération et publication automatiques de `latest.json` et des signatures d'update desktop dans chaque release.
+
 ## 0.4.0
 
 - correction de l'écriture NFC Android : le lecteur reste actif jusqu'à la fin de l'écriture et de la vérification, tout en refusant les callbacks NFC répétés ;

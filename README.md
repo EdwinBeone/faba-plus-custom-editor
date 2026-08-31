@@ -46,7 +46,15 @@ Téléchargez la dernière version dans la page [Releases](https://github.com/Ed
 | macOS Intel et Apple Silicon | image disque universelle `.dmg` |
 | Linux | `.AppImage`, `.deb` ou `.rpm` |
 
-Les versions initiales ne sont pas signées. Windows SmartScreen ou macOS Gatekeeper peuvent donc afficher un avertissement. La signature de code fait partie de la feuille de route.
+Les installateurs ne disposent pas encore d'un certificat de signature de code Windows/macOS : SmartScreen ou Gatekeeper peuvent donc afficher un avertissement lors de la première installation. À partir de la version `0.5.0`, les paquets d'auto-update desktop possèdent en plus une signature Tauri dédiée, contrôlée avant toute installation.
+
+### Mises à jour automatiques
+
+- Windows, macOS et Linux recherchent discrètement une nouvelle release GitHub au démarrage. Une fenêtre propose de télécharger, vérifier, installer puis relancer l'application ; la recherche peut aussi être lancée depuis le menu latéral.
+- Android consulte la même dernière release GitHub. L'application télécharge uniquement `FABA-Tag-Android.apk`, contrôle son URL, sa taille et son empreinte SHA-256, puis ouvre l'installateur Android.
+- Android demande une première autorisation système pour accepter les mises à jour provenant de FABA Tag. L'écran de confirmation Android reste obligatoire pour chaque installation.
+
+La `0.5.0` doit être installée manuellement une dernière fois depuis la page Releases. Les versions suivantes pourront ensuite être proposées par l'application elle-même.
 
 ## Utilisation
 
@@ -110,7 +118,7 @@ Consultez [ARCHITECTURE.md](docs/ARCHITECTURE.md) pour le modèle de données et
 
 ## État et feuille de route
 
-La version `0.3.x` cible FABA+, traite l'ancien FABA en lecture seule et fournit une bibliothèque locale/cloud complète avec synchronisation SD additive et application Android NFC. Les prochaines étapes envisagées sont la restauration guidée des sauvegardes et davantage de validation sur différents modèles de tags et téléphones.
+La version `0.5.x` cible FABA+, traite l'ancien FABA en lecture seule et fournit une bibliothèque locale/cloud complète, la synchronisation SD additive, l'application Android NFC et les mises à jour intégrées depuis GitHub. Les prochaines étapes envisagées sont la restauration guidée des sauvegardes et davantage de validation sur différents modèles de tags et téléphones.
 
 ## Crédits et licence
 

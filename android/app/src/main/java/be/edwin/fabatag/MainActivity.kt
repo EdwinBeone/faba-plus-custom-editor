@@ -9,8 +9,10 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -66,6 +69,7 @@ import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     private val api = ApiClient()
+    private val updateClient = GitHubUpdateClient()
     private lateinit var tokenStore: TokenStore
     private var session by mutableStateOf<AccountSession?>(null)
     private var library by mutableStateOf<CloudLibrary?>(null)
@@ -76,11 +80,29 @@ class MainActivity : ComponentActivity() {
     private var deleteTarget by mutableStateOf<CloudPlaylist?>(null)
     private var pendingNfc by mutableStateOf<CloudPlaylist?>(null)
     private var nfcResult by mutableStateOf<String?>(null)
+    private var availableUpdate by mutableStateOf<AppUpdate?>(null)
+    private var updateDialogVisible by mutableStateOf(false)
+    private var updateChecking by mutableStateOf(false)
+    private var updateDownloading by mutableStateOf(false)
+    private var updateProgress by mutableStateOf<Int?>(null)
+    private var updateError by mutableStateOf<String?>(null)
+    private var pendingInstallApk: File? = null
     private var pickerTarget: CloudPlaylist? = null
     private var nfcAdapter: NfcAdapter? = null
     // A session is armed explicitly by the user and may consume exactly one tag.
     // Keeping the gate closed after the callback also blocks queued reader events.
     private val nfcWriteGate = NfcWriteGate()
+
+    private val unknownSourcesLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val apk = pendingInstallApk ?: return@registerForActivityResult
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+            pendingInstallApk = null
+            launchPackageInstaller(apk)
+        } else {
+            pendingInstallApk = null
+            statusMessage = "Autorisez FABA Tag à installer des applications, puis relancez la mise à jour."
+        }
+    }
 
     private val audioPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@registerForActivityResult
@@ -143,6 +165,12 @@ class MainActivity : ComponentActivity() {
                     deleteTarget = deleteTarget,
                     pendingNfc = pendingNfc,
                     nfcResult = nfcResult,
+                    availableUpdate = availableUpdate,
+                    updateDialogVisible = updateDialogVisible,
+                    updateChecking = updateChecking,
+                    updateDownloading = updateDownloading,
+                    updateProgress = updateProgress,
+                    updateError = updateError,
                     onAuthenticate = ::authenticate,
                     onRefresh = ::refreshLibrary,
                     onLogout = ::logout,
@@ -161,10 +189,14 @@ class MainActivity : ComponentActivity() {
                     onCancelNfc = ::cancelNfc,
                     onDismissResult = { nfcResult = null },
                     onDismissStatus = { statusMessage = null },
+                    onCheckUpdate = ::openOrCheckUpdate,
+                    onInstallUpdate = ::downloadAndInstallUpdate,
+                    onDismissUpdate = { if (!updateDownloading) updateDialogVisible = false },
                 )
             }
         }
         if (session != null) refreshLibrary()
+        checkForAppUpdate(manual = false)
     }
 
     override fun onResume() {
@@ -175,6 +207,92 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         nfcAdapter?.disableReaderMode(this)
         super.onPause()
+    }
+
+    private fun openOrCheckUpdate() {
+        if (availableUpdate != null) {
+            updateError = null
+            updateDialogVisible = true
+        } else {
+            checkForAppUpdate(manual = true)
+        }
+    }
+
+    private fun checkForAppUpdate(manual: Boolean) {
+        if (updateChecking || updateDownloading) return
+        updateChecking = true
+        if (manual) statusMessage = "Recherche de la dernière release GitHub…"
+        lifecycleScope.launch {
+            runCatching { withContext(Dispatchers.IO) { updateClient.check() } }
+                .onSuccess { update ->
+                    availableUpdate = update
+                    if (update != null) {
+                        updateError = null
+                        updateDialogVisible = true
+                        statusMessage = null
+                    } else if (manual) {
+                        statusMessage = "FABA Tag ${BuildConfig.VERSION_NAME} est déjà à jour."
+                    }
+                }
+                .onFailure { error ->
+                    if (manual) statusMessage = error.message ?: "Vérification de la mise à jour impossible."
+                }
+            updateChecking = false
+        }
+    }
+
+    private fun downloadAndInstallUpdate() {
+        val update = availableUpdate ?: return
+        if (updateDownloading) return
+        updateDownloading = true
+        updateProgress = 0
+        updateError = null
+        lifecycleScope.launch {
+            val destination = File(File(cacheDir, "updates"), "FABA-Tag-${update.version}.apk")
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    updateClient.download(update, destination) { progress ->
+                        runOnUiThread { updateProgress = progress }
+                    }
+                }
+            }.onSuccess {
+                updateDownloading = false
+                updateProgress = 100
+                updateDialogVisible = false
+                installDownloadedApk(destination)
+            }.onFailure { error ->
+                updateDownloading = false
+                updateProgress = null
+                updateError = error.message ?: "Téléchargement de la mise à jour impossible."
+            }
+        }
+    }
+
+    private fun installDownloadedApk(apk: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            pendingInstallApk = apk
+            statusMessage = "Android doit autoriser FABA Tag comme source de mise à jour. Activez l'autorisation sur l'écran suivant."
+            unknownSourcesLauncher.launch(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+            )
+            return
+        }
+        launchPackageInstaller(apk)
+    }
+
+    private fun launchPackageInstaller(apk: File) {
+        runCatching {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+            startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            )
+        }.onSuccess {
+            statusMessage = "Mise à jour vérifiée. Confirmez maintenant l'installation dans Android."
+        }.onFailure { error ->
+            statusMessage = error.message ?: "Android n'a pas pu ouvrir l'installateur de mise à jour."
+        }
     }
 
     private fun authenticate(register: Boolean, email: String, password: String, name: String) {
@@ -474,6 +592,12 @@ private fun FabaApp(
     deleteTarget: CloudPlaylist?,
     pendingNfc: CloudPlaylist?,
     nfcResult: String?,
+    availableUpdate: AppUpdate?,
+    updateDialogVisible: Boolean,
+    updateChecking: Boolean,
+    updateDownloading: Boolean,
+    updateProgress: Int?,
+    updateError: String?,
     onAuthenticate: (Boolean, String, String, String) -> Unit,
     onRefresh: () -> Unit,
     onLogout: () -> Unit,
@@ -492,13 +616,16 @@ private fun FabaApp(
     onCancelNfc: () -> Unit,
     onDismissResult: () -> Unit,
     onDismissStatus: () -> Unit,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    onDismissUpdate: () -> Unit,
 ) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
             if (session == null) {
-                AuthScreen(loading, statusMessage, onAuthenticate, onDismissStatus)
+                AuthScreen(loading, statusMessage, updateChecking, availableUpdate, onAuthenticate, onDismissStatus, onCheckUpdate)
             } else {
-                LibraryScreen(session, library, loading, statusMessage, onRefresh, onLogout, onImport, onEdit, onRename, onDelete, onArmNfc, onDismissStatus)
+                LibraryScreen(session, library, loading, statusMessage, updateChecking, availableUpdate, onRefresh, onLogout, onImport, onEdit, onRename, onDelete, onArmNfc, onDismissStatus, onCheckUpdate)
             }
         }
     }
@@ -535,14 +662,27 @@ private fun FabaApp(
             confirmButton = { Button(onClick = onDismissResult) { Text("Terminé") } },
         )
     }
+    if (updateDialogVisible && availableUpdate != null) {
+        AppUpdateDialog(
+            update = availableUpdate,
+            downloading = updateDownloading,
+            progress = updateProgress,
+            error = updateError,
+            onInstall = onInstallUpdate,
+            onDismiss = onDismissUpdate,
+        )
+    }
 }
 
 @Composable
 private fun AuthScreen(
     loading: Boolean,
     statusMessage: String?,
+    updateChecking: Boolean,
+    availableUpdate: AppUpdate?,
     onAuthenticate: (Boolean, String, String, String) -> Unit,
     onDismissStatus: () -> Unit,
+    onCheckUpdate: () -> Unit,
 ) {
     var register by remember { mutableStateOf(false) }
     var email by remember { mutableStateOf("") }
@@ -569,6 +709,9 @@ private fun AuthScreen(
             TextButton(onClick = { register = !register }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                 Text(if (register) "J'ai déjà un compte" else "Créer un compte")
             }
+            TextButton(onClick = onCheckUpdate, enabled = !updateChecking, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Text(if (availableUpdate != null) "Mise à jour ${availableUpdate.version} disponible" else "Version ${BuildConfig.VERSION_NAME} · Rechercher une mise à jour")
+            }
         }
     }
 }
@@ -579,6 +722,8 @@ private fun LibraryScreen(
     library: CloudLibrary?,
     loading: Boolean,
     statusMessage: String?,
+    updateChecking: Boolean,
+    availableUpdate: AppUpdate?,
     onRefresh: () -> Unit,
     onLogout: () -> Unit,
     onImport: (CloudPlaylist?) -> Unit,
@@ -587,6 +732,7 @@ private fun LibraryScreen(
     onDelete: (CloudPlaylist) -> Unit,
     onArmNfc: (CloudPlaylist) -> Unit,
     onDismissStatus: () -> Unit,
+    onCheckUpdate: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         Surface(shadowElevation = 2.dp) {
@@ -599,7 +745,12 @@ private fun LibraryScreen(
                         Text("Bonjour ${session.displayName}", fontWeight = FontWeight.ExtraBold, fontSize = 19.sp)
                         Text(session.email, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
-                    TextButton(onClick = onRefresh, enabled = !loading) { Text("Actualiser") }
+                    Column(horizontalAlignment = Alignment.End) {
+                        TextButton(onClick = onRefresh, enabled = !loading) { Text("Actualiser") }
+                        TextButton(onClick = onCheckUpdate, enabled = !updateChecking && !loading) {
+                            Text(if (availableUpdate != null) "MàJ ${availableUpdate.version}" else "Mises à jour", fontSize = 11.sp)
+                        }
+                    }
                 }
                 library?.let {
                     val percent = if (it.storageLimitBytes > 0) (it.storageUsedBytes * 100 / it.storageLimitBytes) else 0
@@ -672,6 +823,54 @@ private fun PlaylistCard(
             }
         }
     }
+}
+
+@Composable
+private fun AppUpdateDialog(
+    update: AppUpdate,
+    downloading: Boolean,
+    progress: Int?,
+    error: String?,
+    onInstall: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { if (!downloading) onDismiss() },
+        icon = {
+            Box(Modifier.size(54.dp).background(Color(0xFFEAF8F1), CircleShape), contentAlignment = Alignment.Center) {
+                Text("↓", color = Color(0xFF247A58), fontWeight = FontWeight.Black, fontSize = 26.sp)
+            }
+        },
+        title = { Text("FABA Tag ${update.version} est disponible") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Surface(color = Color(0xFFF7F5FA), shape = RoundedCornerShape(12.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column { Text("Installée", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(BuildConfig.VERSION_NAME, fontWeight = FontWeight.Bold) }
+                        Text("→", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Column(horizontalAlignment = Alignment.End) { Text("Nouvelle", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(update.version, fontWeight = FontWeight.Bold) }
+                    }
+                }
+                Text("L'APK est téléchargé depuis la release GitHub officielle et son empreinte SHA-256 est vérifiée avant installation.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                if (update.releaseNotes.isNotBlank()) {
+                    Text(update.releaseNotes, modifier = Modifier.heightIn(max = 150.dp), fontSize = 12.sp, overflow = TextOverflow.Ellipsis)
+                }
+                if (downloading) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                        Text(if (progress == null) "Téléchargement…" else "Téléchargement et vérification… $progress %", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onInstall, enabled = !downloading) {
+                Text(if (downloading) "Préparation…" else "Télécharger et installer")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !downloading) { Text("Plus tard") } },
+    )
 }
 
 @Composable

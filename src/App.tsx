@@ -1,6 +1,8 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   AlertTriangle,
   ArrowDown,
@@ -137,6 +139,12 @@ type BatchImport = { paths: string[] };
 type PlaylistEdit = { figureId: string; addedPaths: string[] };
 
 type Toast = { tone: "success" | "error" | "info"; message: string };
+type DesktopUpdateInfo = {
+  currentVersion: string;
+  version: string;
+  body?: string;
+};
+type DesktopUpdateState = "idle" | "checking" | "downloading" | "restarting";
 
 const browserPreviewLibrary: CloudLibrary = {
   version: 8,
@@ -198,6 +206,11 @@ function App() {
   const [playlistEdit, setPlaylistEdit] = useState<PlaylistEdit | null>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [dropPlaylistId, setDropPlaylistId] = useState<string | null>(null);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateInfo | null>(null);
+  const [updateState, setUpdateState] = useState<DesktopUpdateState>("idle");
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const updateRef = useRef<Update | null>(null);
 
   const refreshSources = async () => {
     setSourceBusy(true);
@@ -240,15 +253,79 @@ function App() {
     }
   };
 
+  const checkDesktopUpdate = async (notify = false) => {
+    if (!("__TAURI_INTERNALS__" in window) || updateState === "downloading" || updateState === "restarting") return;
+    setUpdateState("checking");
+    try {
+      const update = await check({ timeout: 20_000 });
+      if (updateRef.current && updateRef.current !== update) void updateRef.current.close();
+      updateRef.current = update;
+      if (update) {
+        setDesktopUpdate({
+          currentVersion: update.currentVersion,
+          version: update.version,
+          body: update.body,
+        });
+        setUpdateDismissed(false);
+      } else {
+        setDesktopUpdate(null);
+        if (notify) showToast("success", "FABA+ Custom Editor est déjà à jour.");
+      }
+    } catch (error) {
+      if (notify) showToast("error", `Vérification de la mise à jour impossible : ${stringifyError(error)}`);
+    } finally {
+      setUpdateState("idle");
+    }
+  };
+
+  const installDesktopUpdate = async () => {
+    const update = updateRef.current;
+    if (!update) return;
+    setUpdateState("downloading");
+    setUpdateProgress(0);
+    let downloaded = 0;
+    let total: number | undefined;
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength;
+          downloaded = 0;
+          setUpdateProgress(total ? 0 : null);
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          setUpdateProgress(total ? Math.min(100, Math.round(downloaded * 100 / total)) : null);
+        } else {
+          setUpdateProgress(100);
+        }
+      });
+      setUpdateState("restarting");
+      await relaunch();
+    } catch (error) {
+      setUpdateState("idle");
+      setUpdateProgress(null);
+      showToast("error", `Installation de la mise à jour impossible : ${stringifyError(error)}`);
+    }
+  };
+
   useEffect(() => {
     if ("__TAURI_INTERNALS__" in window) {
       void refreshSources();
       void refreshCloud();
+      const updateTimer = window.setTimeout(() => void checkDesktopUpdate(), 1500);
+      return () => window.clearTimeout(updateTimer);
     }
     else {
       setSourceBusy(false);
-      if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("preview-library")) {
-        setCloudLibrary(browserPreviewLibrary);
+      if (import.meta.env.DEV) {
+        const preview = new URLSearchParams(window.location.search);
+        if (preview.has("preview-library")) setCloudLibrary(browserPreviewLibrary);
+        if (preview.has("preview-update")) {
+          setDesktopUpdate({
+            currentVersion: "0.4.0",
+            version: "0.5.0",
+            body: "Mises à jour intégrées depuis GitHub, vérification cryptographique et installation guidée.",
+          });
+        }
       }
     }
   }, []);
@@ -581,6 +658,15 @@ function App() {
           </button>
           <button className="nav-item" type="button" onClick={() => setDiagnosticsOpen(true)}>
             <Bug size={18} /> Diagnostic technique
+          </button>
+          <button
+            className={`nav-item ${desktopUpdate ? "update-available" : ""}`}
+            type="button"
+            onClick={() => desktopUpdate ? setUpdateDismissed(false) : void checkDesktopUpdate(true)}
+            disabled={updateState === "checking"}
+          >
+            {updateState === "checking" ? <LoaderCircle className="spin" size={18} /> : <Download size={18} />}
+            {desktopUpdate ? `Mise à jour ${desktopUpdate.version}` : "Rechercher une mise à jour"}
           </button>
           <button className="nav-item" type="button" onClick={() => setCloudOpen(true)}>
             {cloudStatus?.authenticated ? <Cloud size={18} /> : <CloudOff size={18} />} FABA Cloud
@@ -925,6 +1011,70 @@ function App() {
           onNotify={showToast}
         />
       )}
+
+      {desktopUpdate && !updateDismissed && (
+        <DesktopUpdateModal
+          update={desktopUpdate}
+          state={updateState}
+          progress={updateProgress}
+          onInstall={() => void installDesktopUpdate()}
+          onClose={() => setUpdateDismissed(true)}
+        />
+      )}
+    </div>
+  );
+}
+
+function DesktopUpdateModal({
+  update,
+  state,
+  progress,
+  onInstall,
+  onClose,
+}: {
+  update: DesktopUpdateInfo;
+  state: DesktopUpdateState;
+  progress: number | null;
+  onInstall: () => void;
+  onClose: () => void;
+}) {
+  const installing = state === "downloading" || state === "restarting";
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title">
+        <div className="modal-header">
+          <div>
+            <span className="modal-icon update-icon"><Download size={20} /></span>
+            <div><p>Mise à jour sécurisée</p><h2 id="update-title">FABA+ Custom Editor {update.version}</h2></div>
+          </div>
+          {!installing && <button className="icon-button" type="button" onClick={onClose} aria-label="Plus tard"><X size={19} /></button>}
+        </div>
+        <div className="update-body">
+          <div className="update-version-row">
+            <span>Version installée <strong>{update.currentVersion}</strong></span>
+            <ChevronRight size={18} />
+            <span>Nouvelle version <strong>{update.version}</strong></span>
+          </div>
+          <p className="update-copy">La mise à jour provient de la release GitHub officielle et sa signature sera contrôlée avant l'installation.</p>
+          {update.body?.trim() && <div className="update-notes"><strong>Nouveautés</strong><p>{update.body}</p></div>}
+          {installing && (
+            <div className="update-progress" aria-live="polite">
+              <div><span>{state === "restarting" ? "Redémarrage…" : "Téléchargement et installation…"}</span><strong>{progress === null ? "" : `${progress} %`}</strong></div>
+              <div className={progress === null ? "indeterminate" : ""}><i style={progress === null ? undefined : { width: `${progress}%` }} /></div>
+            </div>
+          )}
+        </div>
+        <div className="modal-footer update-footer">
+          <span><ShieldCheck size={16} /> Signature de la release vérifiée automatiquement</span>
+          <div>
+            <button className="button secondary" type="button" onClick={onClose} disabled={installing}>Plus tard</button>
+            <button className="button primary" type="button" onClick={onInstall} disabled={installing}>
+              {installing ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+              {state === "restarting" ? "Redémarrage…" : "Installer maintenant"}
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

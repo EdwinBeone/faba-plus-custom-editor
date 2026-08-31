@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FABA+ Custom Editor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "be.edwin.fabapluscustomeditor",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -30,6 +30,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "category": "Utility",
     "shortDescription": "Manage your own audio on a FABA+ microSD card",
@@ -42,5 +43,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE1QzJGMzBCN0Q4MTQwMzEKUldReFFJRjlDL1BDcGQ4MStCWjBOSEdNa2xEY2RDb1cxS3ZoQ1VmWFVibzZiT3hlUFFjUFF6Z2UK",
+      "endpoints": [
+        "https://github.com/EdwinBeone/faba-plus-custom-editor/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

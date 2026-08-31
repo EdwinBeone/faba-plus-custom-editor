@@ -15,7 +15,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             let app_data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data)?;
             let database = LibraryDatabase::new(app_data.join("library.sqlite3"));
