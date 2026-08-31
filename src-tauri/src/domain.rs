@@ -170,6 +170,14 @@ pub fn scan_card(selected_path: &Path) -> Result<CardSnapshot> {
     if kind == CardKind::Empty {
         warnings.push("Aucun contenu FABA+ détecté. Ce dossier peut être initialisé avec votre première figurine.".into());
     }
+    if root != selected_path
+        && is_named_directory(&root, "PLAYER")
+        && has_figure_folders(selected_path)
+    {
+        warnings.push(
+            "Des dossiers Kxxxx ont été détectés à la racine de la carte. Sur FABA+, ils doivent être placés dans le dossier PLAYER.".into(),
+        );
+    }
 
     Ok(CardSnapshot {
         root_path: path_string(&root),
@@ -181,6 +189,12 @@ pub fn scan_card(selected_path: &Path) -> Result<CardSnapshot> {
 }
 
 pub fn discover_content_root(selected_path: &Path) -> PathBuf {
+    if is_named_directory(selected_path, "PLAYER") {
+        return selected_path.to_path_buf();
+    }
+    if let Some(player) = find_child_directory(selected_path, "PLAYER") {
+        return player;
+    }
     if has_figure_folders(selected_path) {
         return selected_path.to_path_buf();
     }
@@ -192,7 +206,26 @@ pub fn discover_content_root(selected_path: &Path) -> PathBuf {
 }
 
 pub fn looks_like_card(selected_path: &Path) -> bool {
-    has_figure_folders(selected_path) || has_figure_folders(&selected_path.join("MKI01"))
+    is_named_directory(selected_path, "PLAYER")
+        || find_child_directory(selected_path, "PLAYER").is_some()
+        || has_figure_folders(selected_path)
+        || has_figure_folders(&selected_path.join("MKI01"))
+}
+
+fn is_named_directory(path: &Path, expected_name: &str) -> bool {
+    path.is_dir()
+        && path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected_name))
+}
+
+fn find_child_directory(parent: &Path, expected_name: &str) -> Option<PathBuf> {
+    fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| is_named_directory(path, expected_name))
 }
 
 fn has_figure_folders(path: &Path) -> bool {
@@ -512,6 +545,39 @@ mod tests {
         assert_eq!(snapshot.kind, CardKind::LegacyFaba);
         assert!(!snapshot.writable);
         assert_eq!(snapshot.root_path, path_string(&card.path().join("MKI01")));
+    }
+
+    #[test]
+    fn discovers_player_and_writes_figures_inside_it() {
+        let card = tempdir().unwrap();
+        let source = tempdir().unwrap();
+        let backups = tempdir().unwrap();
+        fs::create_dir_all(card.path().join("PLAYER/KTEST")).unwrap();
+        fs::create_dir_all(card.path().join("K0001")).unwrap();
+        fs::write(card.path().join("K0001/CP00.faba"), b"misplaced").unwrap();
+        fake_mp3(&source.path().join("01.mp3"), b"inside-player");
+
+        assert!(looks_like_card(card.path()));
+        let snapshot = scan_card(card.path()).unwrap();
+        assert_eq!(snapshot.root_path, path_string(&card.path().join("PLAYER")));
+        assert!(snapshot
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("racine de la carte")));
+
+        write_faba_plus_figure(
+            Path::new(&snapshot.root_path),
+            "0742",
+            &[source.path().join("01.mp3")],
+            backups.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(card.path().join("PLAYER/K0742/CP00.faba")).unwrap(),
+            b"inside-player"
+        );
+        assert!(!card.path().join("K0742").exists());
     }
 
     #[test]

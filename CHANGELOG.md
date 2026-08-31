@@ -1,5 +1,11 @@
 # Journal des versions
 
+## 0.1.2
+
+- détection prioritaire du dossier `PLAYER` d'une carte FABA+, même s'il ne contient encore que `KTEST` ;
+- écriture des nouvelles figurines dans `PLAYER/Kxxxx` au lieu de la racine de la carte ;
+- avertissement lorsqu'un dossier `Kxxxx` mal placé est détecté à la racine.
+
 ## 0.1.1
 
 - correction de l'écriture d'une nouvelle figurine sous Windows : le fichier `info` est désormais fermé avant le renommage atomique du dossier ;

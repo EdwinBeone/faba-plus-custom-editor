@@ -10,7 +10,7 @@ React / TypeScript
         ▼
 Rust ── scan, validation, écriture atomique, sauvegardes
   │
-  ├── carte microSD : Kxxxx/CPxx.faba + info
+  ├── carte microSD : PLAYER/Kxxxx/CPxx.faba + info
   └── SQLite local : cartes, noms de figurines, noms de pistes
 ```
 
@@ -21,10 +21,11 @@ Le frontend ne possède pas d'accès général en écriture au système de fichi
 Pour l'identifiant `0742`, l'application produit :
 
 ```text
-K0742/
-├── CP00.faba
-├── CP01.faba
-└── info
+PLAYER/
+└── K0742/
+    ├── CP00.faba
+    ├── CP01.faba
+    └── info
 ```
 
 Les fichiers `.faba` sont les MP3 d'origine avec l'extension attendue par FABA+. Le fichier `info` contient :

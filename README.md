@@ -18,7 +18,7 @@ Les excellentes recherches de [`wansors/myfaba-hacks`](https://github.com/wansor
 
 - détection automatique des cartes et supports amovibles ;
 - sélection manuelle d'un dossier en solution de secours ;
-- scan non destructif des dossiers `Kxxxx` et du fichier `info` ;
+- détection du dossier FABA+ `PLAYER`, puis scan non destructif des dossiers `Kxxxx` et du fichier `info` ;
 - bibliothèque locale SQLite liée aux cartes déjà rencontrées ;
 - noms de figurines et noms de pistes conservés localement ;
 - ajout ou remplacement de 1 à 99 fichiers MP3, dans l'ordre choisi ;
@@ -48,7 +48,7 @@ Les versions initiales ne sont pas signées. Windows SmartScreen ou macOS Gateke
 1. Éteignez la FABA+ et retirez sa carte microSD.
 2. Insérez la carte dans l'ordinateur.
 3. Ouvrez FABA+ Custom Editor et sélectionnez la carte détectée.
-4. Cliquez sur **Ajouter une figurine**, choisissez un identifiant et vos MP3.
+4. Cliquez sur **Ajouter une figurine**, choisissez un identifiant et vos MP3. L'application place la figurine dans `PLAYER/Kxxxx`.
 5. Réordonnez les pistes, acceptez l'avertissement, puis enregistrez.
 6. Éjectez proprement la carte avant de la remettre dans la FABA+.
 
