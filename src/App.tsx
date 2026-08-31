@@ -719,6 +719,8 @@ function FigureEditor({
   const [saving, setSaving] = useState(false);
 
   const normalizedId = normalizeFigureId(figureId);
+  const validCustomId = isCustomFigureId(normalizedId);
+  const showInvalidId = figureId.length === 4 && !validCustomId;
   const collision = existingFigures.find((figure) => figure.id === normalizedId);
 
   const pickAudio = async () => {
@@ -744,8 +746,8 @@ function FigureEditor({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!normalizedId || normalizedId === "0000") {
-      onError("Saisissez un identifiant entre 0001 et 9999.");
+    if (!validCustomId) {
+      onError("Choisissez un identifiant entre 2000 et 8999. Les plages 0xxx, 1xxx et 9xxx sont réservées par FABA+.");
       return;
     }
     if (audioPaths.length === 0) {
@@ -782,7 +784,7 @@ function FigureEditor({
         <form onSubmit={submit}>
           <div className="modal-body">
             <div className="form-grid">
-              <label><span>Identifiant de figurine</span><div className="id-input"><b>K</b><input value={figureId} onChange={(event) => setFigureId(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="0742" disabled={Boolean(initialFigure)} inputMode="numeric" /></div><small>Choisissez un numéro libre entre 0001 et 9999. Il sera ensuite encodé sur un tag NFC vierge.</small></label>
+              <label><span>Identifiant de figurine</span><div className={`id-input ${showInvalidId ? "invalid" : ""}`}><b>K</b><input value={figureId} onChange={(event) => setFigureId(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="3101" disabled={Boolean(initialFigure)} inputMode="numeric" aria-invalid={showInvalidId} /></div><small className={showInvalidId ? "field-error" : ""}>{showInvalidId ? "Identifiant réservé ou invalide : utilisez une valeur de 2000 à 8999." : "Choisissez un numéro libre entre 2000 et 8999. Les plages 0xxx, 1xxx et 9xxx sont réservées par FABA+."}</small></label>
               <label><span>Nom dans ma bibliothèque</span><input value={customName} onChange={(event) => setCustomName(event.target.value)} placeholder="Histoires du soir" maxLength={80} /><small>Conservé uniquement sur cet ordinateur.</small></label>
             </div>
 
@@ -816,7 +818,7 @@ function FigureEditor({
           </div>
           <div className="modal-footer">
             <span><ShieldCheck size={16} /> Une sauvegarde précède tout remplacement</span>
-            <div><button className="button secondary" type="button" onClick={onClose}>Annuler</button><button className="button primary" type="submit" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <Upload size={17} />}{initialFigure || collision ? "Sauvegarder et remplacer" : "Ajouter à la carte"}</button></div>
+            <div><button className="button secondary" type="button" onClick={onClose}>Annuler</button><button className="button primary" type="submit" disabled={saving || !validCustomId}>{saving ? <LoaderCircle className="spin" size={17} /> : <Upload size={17} />}{initialFigure || collision ? "Sauvegarder et remplacer" : "Ajouter à la carte"}</button></div>
           </div>
         </form>
       </section>
@@ -852,6 +854,10 @@ function fileName(path: string) {
 function normalizeFigureId(value: string) {
   if (!value || !/^\d{1,4}$/.test(value)) return "";
   return value.padStart(4, "0");
+}
+
+function isCustomFigureId(value: string) {
+  return /^\d{4}$/.test(value) && value[0] >= "2" && value[0] <= "8";
 }
 
 function stringifyError(error: unknown) {

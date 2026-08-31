@@ -18,20 +18,20 @@ Le frontend ne possède pas d'accès général en écriture au système de fichi
 
 ## Modèle FABA+
 
-Pour l'identifiant `0742`, l'application produit :
+Pour l'identifiant personnalisé `3101`, l'application produit :
 
 ```text
 PLAYER/
-└── K0742/
-    ├── CP00.faba
-    ├── CP01.faba
+└── K3101/
+    ├── 00.faba
+    ├── 01.faba
     └── info
 ```
 
-Les fichiers `.faba` sont les MP3 d'origine avec l'extension attendue par FABA+. Le fichier `info` contient :
+Les fichiers `.faba` conservent le flux audio MP3. L'application remplace leurs métadonnées par un unique titre ID3v2.3 UTF-16 (`K3101CP01`, `K3101CP02`, etc.), puis écrit le fichier `info` :
 
 ```json
-{"totalTracks":2,"characterDir":"02190530074200"}
+{"totalTracks":2,"characterDir":"02190530310100"}
 ```
 
 ## Garanties d'écriture

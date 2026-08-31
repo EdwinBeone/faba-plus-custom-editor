@@ -1,8 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
+use id3::{frame::Frame, Encoding, Tag, TagLike, Version};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -261,7 +262,7 @@ pub fn write_faba_plus_figure_with_trace(
     trace: &dyn Fn(&str),
 ) -> Result<Option<PathBuf>> {
     trace("validation des paramètres");
-    validate_figure_id(figure_id)?;
+    validate_custom_figure_id(figure_id)?;
     if audio_paths.is_empty() || audio_paths.len() > 99 {
         bail!("Choisissez entre 1 et 99 fichiers MP3.");
     }
@@ -296,12 +297,33 @@ pub fn write_faba_plus_figure_with_trace(
     fs::create_dir(&staging).context("Impossible de créer le dossier temporaire sur la carte.")?;
 
     let result = (|| -> Result<()> {
-        trace(&format!("copie de {} piste(s) MP3", audio_paths.len()));
+        trace(&format!(
+            "copie et préparation ID3 de {} piste(s) MP3",
+            audio_paths.len()
+        ));
         for (index, source) in audio_paths.iter().enumerate() {
-            let target = staging.join(format!("CP{index:02}.faba"));
+            let target = staging.join(format!("{index:02}.faba"));
             fs::copy(source, &target).with_context(|| {
                 format!("Impossible de copier {} vers la carte", source.display())
             })?;
+            remove_id3v1_tag(&target).with_context(|| {
+                format!(
+                    "Impossible de nettoyer les métadonnées de {}",
+                    source.display()
+                )
+            })?;
+            let mut tag = Tag::new();
+            tag.add_frame(
+                Frame::text("TIT2", format!("K{figure_id}CP{:02}", index + 1))
+                    .set_encoding(Some(Encoding::UTF16)),
+            );
+            tag.write_to_path(&target, Version::Id3v23)
+                .with_context(|| {
+                    format!(
+                        "Impossible de préparer les métadonnées FABA+ de {}",
+                        source.display()
+                    )
+                })?;
         }
         let info = serde_json::json!({
             "totalTracks": audio_paths.len(),
@@ -394,6 +416,16 @@ fn validate_figure_id(figure_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_custom_figure_id(figure_id: &str) -> Result<()> {
+    validate_figure_id(figure_id)?;
+    if matches!(figure_id.as_bytes()[0], b'0' | b'1' | b'9') {
+        bail!(
+            "Les identifiants 0xxx, 1xxx et 9xxx sont réservés par FABA+. Choisissez un identifiant entre 2000 et 8999."
+        );
+    }
+    Ok(())
+}
+
 fn parse_figure_folder(value: &str) -> Option<String> {
     (value.len() == 5
         && value.starts_with('K')
@@ -402,11 +434,30 @@ fn parse_figure_folder(value: &str) -> Option<String> {
 }
 
 fn parse_track_index(value: &str) -> Option<u16> {
-    let rest = value
-        .strip_prefix("CP")
-        .or_else(|| value.strip_prefix("cp"))?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let stem = Path::new(value).file_stem()?.to_str()?;
+    let digits = if let Some(rest) = stem.strip_prefix("CP").or_else(|| stem.strip_prefix("cp")) {
+        rest
+    } else if stem.bytes().all(|byte| byte.is_ascii_digit()) {
+        stem
+    } else {
+        return None;
+    };
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn remove_id3v1_tag(path: &Path) -> Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let length = file.metadata()?.len();
+    if length < 128 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-128))?;
+    let mut marker = [0_u8; 3];
+    file.read_exact(&mut marker)?;
+    if marker == *b"TAG" {
+        file.set_len(length - 128)?;
+    }
+    Ok(())
 }
 
 fn read_plus_info(path: &Path) -> Result<FabaPlusInfo> {
@@ -500,7 +551,7 @@ mod tests {
 
         let first_backup = write_faba_plus_figure(
             card.path(),
-            "0742",
+            "3742",
             &[source.path().join("01.mp3"), source.path().join("02.mp3")],
             backups.path(),
         )
@@ -512,26 +563,37 @@ mod tests {
         assert_eq!(snapshot.figures.len(), 1);
         assert_eq!(snapshot.figures[0].tracks.len(), 2);
         assert_eq!(
-            fs::read(card.path().join("K0742/CP00.faba")).unwrap(),
-            b"first"
+            Tag::read_from_path(card.path().join("K3742/00.faba"))
+                .unwrap()
+                .title(),
+            Some("K3742CP01")
         );
+        let first_track = fs::read(card.path().join("K3742/00.faba")).unwrap();
+        assert!(first_track
+            .windows(3)
+            .any(|bytes| bytes == [0x01, 0xff, 0xfe] || bytes == [0x01, 0xfe, 0xff]));
+        assert!(first_track
+            .windows(b"first".len())
+            .any(|bytes| bytes == b"first"));
         assert_eq!(
-            fs::read_to_string(card.path().join("K0742/info")).unwrap(),
-            r#"{"characterDir":"02190530074200","totalTracks":2}"#
+            fs::read_to_string(card.path().join("K3742/info")).unwrap(),
+            r#"{"characterDir":"02190530374200","totalTracks":2}"#
         );
 
         fake_mp3(&source.path().join("03.mp3"), b"replacement");
         let replacement_backup = write_faba_plus_figure(
             card.path(),
-            "0742",
+            "3742",
             &[source.path().join("03.mp3")],
             backups.path(),
         )
         .unwrap();
-        assert!(replacement_backup.unwrap().join("CP00.faba").is_file());
+        assert!(replacement_backup.unwrap().join("00.faba").is_file());
         assert_eq!(
-            fs::read(card.path().join("K0742/CP00.faba")).unwrap(),
-            b"replacement"
+            Tag::read_from_path(card.path().join("K3742/00.faba"))
+                .unwrap()
+                .title(),
+            Some("K3742CP01")
         );
     }
 
@@ -567,17 +629,19 @@ mod tests {
 
         write_faba_plus_figure(
             Path::new(&snapshot.root_path),
-            "0742",
+            "3742",
             &[source.path().join("01.mp3")],
             backups.path(),
         )
         .unwrap();
 
         assert_eq!(
-            fs::read(card.path().join("PLAYER/K0742/CP00.faba")).unwrap(),
-            b"inside-player"
+            Tag::read_from_path(card.path().join("PLAYER/K3742/00.faba"))
+                .unwrap()
+                .title(),
+            Some("K3742CP01")
         );
-        assert!(!card.path().join("K0742").exists());
+        assert!(!card.path().join("K3742").exists());
     }
 
     #[test]
@@ -586,6 +650,10 @@ mod tests {
         let source = tempdir().unwrap();
         let backups = tempdir().unwrap();
         fs::write(source.path().join("track.wav"), b"wav").unwrap();
+        fake_mp3(&source.path().join("track.mp3"), b"mp3");
+
+        assert!(validate_custom_figure_id("2000").is_ok());
+        assert!(validate_custom_figure_id("8999").is_ok());
 
         assert!(write_faba_plus_figure(
             card.path(),
@@ -596,10 +664,20 @@ mod tests {
         .is_err());
         assert!(write_faba_plus_figure(
             card.path(),
-            "1234",
+            "3101",
             &[source.path().join("track.wav")],
             backups.path(),
         )
         .is_err());
+        for reserved in ["0001", "1234", "9001"] {
+            let error = write_faba_plus_figure(
+                card.path(),
+                reserved,
+                &[source.path().join("track.mp3")],
+                backups.path(),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("réservés par FABA+"));
+        }
     }
 }

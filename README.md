@@ -22,7 +22,7 @@ Les excellentes recherches de [`wansors/myfaba-hacks`](https://github.com/wansor
 - bibliothèque locale SQLite liée aux cartes déjà rencontrées ;
 - noms de figurines et noms de pistes conservés localement ;
 - ajout ou remplacement de 1 à 99 fichiers MP3, dans l'ordre choisi ;
-- génération automatique de `CP00.faba`, `CP01.faba`, etc. et du fichier `info` ;
+- génération automatique de `00.faba`, `01.faba`, etc., avec titres ID3 FABA+ et fichier `info` ;
 - sauvegarde locale automatique avant chaque remplacement ou suppression ;
 - remplacement atomique : l'ancien dossier est restauré si l'écriture échoue ;
 - lecture des pistes directement depuis la carte ;
@@ -52,7 +52,7 @@ Les versions initiales ne sont pas signées. Windows SmartScreen ou macOS Gateke
 5. Réordonnez les pistes, acceptez l'avertissement, puis enregistrez.
 6. Éjectez proprement la carte avant de la remettre dans la FABA+.
 
-Pour associer un tag, écrivez un enregistrement texte NDEF contenant `02190530XXXX00`, où `XXXX` est l'identifiant à quatre chiffres. La compatibilité des tags et les risques spécifiques sont détaillés dans la [FAQ du projet d'origine](https://github.com/wansors/myfaba-hacks/blob/main/FAQ.md).
+Pour associer un tag, choisissez un identifiant personnalisé entre `2000` et `8999`, ajoutez d'abord son contenu sur la carte, puis écrivez un enregistrement texte NDEF contenant `02190530XXXX00` sur un tag NFC vierge. Les plages `0xxx`, `1xxx` et `9xxx` sont réservées par FABA+. La compatibilité des tags et les risques spécifiques sont détaillés dans la [FAQ du projet d'origine](https://github.com/wansors/myfaba-hacks/blob/main/FAQ.md).
 
 ## Sécurité des données
 

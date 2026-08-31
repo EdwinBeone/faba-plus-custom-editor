@@ -217,7 +217,9 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .form-grid label > input { padding: 0 11px; color: var(--ink); outline: 0; }
 .form-grid label > input:focus, .id-input:focus-within { border-color: #cfc4ea; box-shadow: 0 0 0 3px rgba(109,89,199,.08); }
 .form-grid label > small { display: block; margin-top: 5px; color: var(--muted); font-size: 8px; }
+.form-grid label > small.field-error { color: var(--danger); font-weight: 700; }
 .id-input { display: flex; align-items: center; overflow: hidden; }
+.id-input.invalid { border-color: #e9a9b4; background: #fff7f8; box-shadow: 0 0 0 3px rgba(217,72,95,.08); }
 .id-input b { display: grid; height: 100%; padding: 0 11px; place-items: center; color: #6f657d; background: #f0edf4; font-size: 12px; }
 .id-input input { min-width: 0; width: 100%; height: 100%; padding: 0 10px; border: 0; outline: 0; background: transparent; font-family: ui-monospace, monospace; letter-spacing: .16em; }
 .replace-notice, .risk-check { display: flex; gap: 10px; padding: 11px 12px; border-radius: 10px; }
