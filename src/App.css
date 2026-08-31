@@ -60,6 +60,10 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .sidebar-footer span, .sidebar-footer strong, .sidebar-footer small { display: block; }
 .sidebar-footer strong { color: #39785f; font-size: 10px; }
 .sidebar-footer small { color: #77a18f; font-size: 8px; }
+.cloud-footer { width: 100%; cursor: pointer; text-align: left; }
+.cloud-footer.connected { color: #6650be; border-color: #dfd8f4; background: #f7f4ff; }
+.cloud-footer.connected strong { color: #6650a8; }
+.cloud-footer.connected small { color: #8c80b5; }
 
 .main-content { position: relative; min-width: 0; height: 100vh; padding: 25px 30px 35px; overflow: auto; }
 .topbar { display: flex; align-items: center; justify-content: space-between; min-height: 58px; margin-bottom: 22px; }
@@ -73,6 +77,7 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .button.primary:hover:not(:disabled) { background: linear-gradient(135deg, #f37560, #e94e38); box-shadow: 0 10px 24px rgba(239, 91, 69, .28); }
 .button.secondary { border-color: var(--line); background: #fff; color: #5f596f; }
 .button.secondary:hover:not(:disabled) { border-color: #d8d1e4; box-shadow: 0 6px 16px rgba(56, 47, 86, .07); }
+.button.account-button.connected { color: #59469e; border-color: #dcd4f2; background: #f6f3ff; }
 .button.danger { color: #c83e55; border-color: #f2d8dd; background: #fff6f7; }
 .button.large { min-height: 46px; padding: 12px 18px; font-size: 13px; }
 .icon-button { display: inline-grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; padding: 0; color: #716b83; border: 1px solid var(--line); border-radius: 9px; background: #fff; cursor: pointer; }
@@ -119,7 +124,7 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .safe-float { right: -2%; top: 48px; color: var(--green); }
 .tracks-float { left: -1%; bottom: 48px; color: var(--purple); }
 
-.card-summary { display: grid; grid-template-columns: minmax(300px, 1fr) auto auto auto; gap: 25px; align-items: center; margin-bottom: 17px; padding: 15px 18px; border: 1px solid var(--line); border-radius: 15px; background: #fff; }
+.card-summary { display: grid; grid-template-columns: minmax(260px, 1fr) auto auto auto auto; gap: 20px; align-items: center; margin-bottom: 17px; padding: 15px 18px; border: 1px solid var(--line); border-radius: 15px; background: #fff; }
 .summary-device { display: flex; gap: 12px; align-items: center; min-width: 0; }
 .summary-icon { display: grid; width: 43px; height: 43px; flex: 0 0 auto; place-items: center; color: var(--purple); border-radius: 12px; background: #eee9ff; }
 .summary-device > div:last-child { min-width: 0; }
@@ -135,6 +140,9 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .summary-stat span { color: var(--muted); font-size: 9px; }
 .summary-stat.safe { grid-template-columns: auto 1fr; gap: 6px; align-items: center; color: var(--green); text-align: left; }
 .summary-stat.safe span { color: #5b8f79; font-weight: 700; }
+.cloud-summary { appearance: none; min-width: 94px; color: #9992a6; border-top: 0; border-right: 0; border-bottom: 0; background: transparent; cursor: pointer; }
+.cloud-summary.synced { color: var(--purple); }
+.cloud-summary.synced span { color: #7364ad; font-weight: 700; }
 .inline-warning { display: flex; gap: 9px; align-items: center; margin-bottom: 14px; padding: 10px 13px; color: #8b6c34; border: 1px solid #efe0ba; border-radius: 11px; background: #fff9e9; font-size: 11px; }
 .workspace { display: grid; grid-template-columns: minmax(450px, 1fr) 340px; gap: 17px; align-items: start; }
 .library-panel, .detail-panel { border: 1px solid var(--line); border-radius: 17px; background: #fff; }
@@ -250,6 +258,52 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .modal-footer > span { display: flex; gap: 6px; align-items: center; color: #5a937b; font-size: 8px; font-weight: 650; }
 .modal-footer > div { display: flex; gap: 8px; }
 
+.cloud-library-panel { margin-top: 18px; padding: 20px; border: 1px solid #e5dff2; border-radius: 18px; background: #fff; box-shadow: var(--shadow); }
+.cloud-library-heading, .cloud-library-heading > div { display: flex; align-items: center; justify-content: space-between; gap: 11px; }
+.cloud-library-heading > div > span { display: grid; width: 39px; height: 39px; place-items: center; color: var(--purple); border-radius: 12px; background: #eee9ff; }
+.cloud-library-heading p, .cloud-library-heading h2 { margin: 0; }
+.cloud-library-heading p { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.cloud-library-heading h2 { margin-top: 2px; font-size: 16px; }
+.cloud-playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 10px; margin-top: 17px; }
+.cloud-playlist-grid article { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 13px; background: #fcfbfd; }
+.cloud-playlist-grid .figure-art { grid-row: 1 / 3; width: 52px; height: 52px; }
+.cloud-playlist-grid article div { min-width: 0; }
+.cloud-playlist-grid article strong, .cloud-playlist-grid article small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-playlist-grid article strong { font-size: 11px; }
+.cloud-playlist-grid article small { margin-top: 4px; color: var(--muted); font-size: 8px; }
+.cloud-playlist-grid article code { color: #6c5aa8; font-size: 8px; font-weight: 750; }
+.cloud-playlist-actions { display: flex; grid-column: 2; gap: 7px; align-items: center; justify-content: space-between; }
+.cloud-playlist-actions .button { min-height: 27px; padding: 5px 8px; font-size: 8px; white-space: nowrap; }
+.cloud-library-empty { display: flex; gap: 11px; align-items: center; margin-top: 16px; padding: 15px; color: #786c99; border-radius: 12px; background: #f8f5ff; }
+.cloud-library-empty p { margin: 0; font-size: 10px; line-height: 1.5; }
+
+.cloud-modal { width: min(540px, 100%); }
+.cloud-icon { color: var(--purple); background: #eee9ff; }
+.cloud-auth-body, .cloud-account-body { display: grid; gap: 14px; padding: 23px; }
+.cloud-auth-intro, .cloud-account-hero, .cloud-explainer { display: flex; gap: 12px; align-items: center; }
+.cloud-auth-intro { padding: 14px; color: #6251a2; border-radius: 12px; background: #f7f4ff; }
+.cloud-auth-intro strong, .cloud-auth-intro p { display: block; margin: 0; }
+.cloud-auth-intro strong { font-size: 12px; }
+.cloud-auth-intro p { margin-top: 3px; color: #8177a0; font-size: 9px; }
+.cloud-auth-body label > span { display: block; margin-bottom: 6px; font-size: 10px; font-weight: 750; }
+.cloud-auth-body label > input { width: 100%; height: 42px; padding: 0 12px; color: var(--ink); border: 1px solid var(--line); border-radius: 10px; background: #fbfafc; outline: none; }
+.cloud-auth-body label > input:focus { border-color: #cfc4ea; box-shadow: 0 0 0 3px rgba(109,89,199,.08); }
+.cloud-submit { width: 100%; margin-top: 2px; }
+.link-button { justify-self: center; padding: 3px; color: #6854af; border: 0; background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
+.privacy-note { display: flex; gap: 6px; align-items: center; justify-content: center; color: #6f9a86; font-size: 8px; }
+.cloud-account-hero > span { display: grid; width: 54px; height: 54px; place-items: center; color: var(--purple); border-radius: 16px; background: #eee9ff; }
+.cloud-account-hero strong, .cloud-account-hero small { display: block; }
+.cloud-account-hero strong { font-size: 15px; }
+.cloud-account-hero small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.cloud-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.cloud-info-grid > div { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: #fbfafc; }
+.cloud-info-grid span, .cloud-info-grid strong { display: block; }
+.cloud-info-grid span { color: var(--muted); font-size: 8px; }
+.cloud-info-grid strong { margin-top: 4px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-explainer { align-items: flex-start; padding: 12px; color: #4f8870; border: 1px solid #d9ede5; border-radius: 11px; background: #f3fbf7; }
+.cloud-explainer p { margin: 0; font-size: 9px; line-height: 1.55; }
+.cloud-account-actions { display: flex; justify-content: space-between; gap: 9px; }
+
 .diagnostics-modal { width: min(920px, 100%); }
 .diagnostics-icon { color: #4e6d84; background: #edf5fa; }
 .diagnostics-body { display: grid; gap: 13px; padding: 20px; }
@@ -282,5 +336,5 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
   .workspace { grid-template-columns: 1fr; }
   .detail-panel { position: relative; }
   .card-summary { grid-template-columns: 1fr auto auto; }
-  .summary-stat.safe { display: none; }
+  .summary-stat.safe, .cloud-summary { display: none; }
 }

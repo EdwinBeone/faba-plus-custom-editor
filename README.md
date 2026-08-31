@@ -21,6 +21,10 @@ Les excellentes recherches de [`wansors/myfaba-hacks`](https://github.com/wansor
 - détection du dossier FABA+ `PLAYER`, puis scan non destructif des dossiers `Kxxxx` et du fichier `info` ;
 - bibliothèque locale SQLite liée aux cartes déjà rencontrées ;
 - noms de figurines et noms de pistes conservés localement ;
+- compte FABA Cloud partagé entre le PC et Android ;
+- synchronisation complète des playlists et de leurs MP3, avec contrôle d'intégrité SHA-256 ;
+- import d'une playlist cloud vers une carte SD en un clic ;
+- application Android installable hors store : import de MP3, gestion de la bibliothèque et écriture NFC vérifiée ;
 - ajout ou remplacement de 1 à 99 fichiers MP3, dans l'ordre choisi ;
 - génération automatique de `00.faba`, `01.faba`, etc., avec titres ID3 FABA+ et fichier `info` ;
 - sauvegarde locale automatique avant chaque remplacement ou suppression ;
@@ -54,9 +58,18 @@ Les versions initiales ne sont pas signées. Windows SmartScreen ou macOS Gateke
 
 Pour associer un tag, choisissez un identifiant personnalisé entre `2000` et `8999`, ajoutez d'abord son contenu sur la carte, puis écrivez un enregistrement texte NDEF contenant `02190530XXXX00` sur un tag NFC vierge. Les plages `0xxx`, `1xxx` et `9xxx` sont réservées par FABA+. La compatibilité des tags et les risques spécifiques sont détaillés dans la [FAQ du projet d'origine](https://github.com/wansors/myfaba-hacks/blob/main/FAQ.md).
 
+### FABA Cloud et Android
+
+1. Dans l'application PC, ouvrez **FABA Cloud**, créez un compte puis ouvrez une carte : les playlists et MP3 personnels sont envoyés dans votre bibliothèque privée.
+2. Installez `FABA-Tag-Android.apk` depuis la page Releases et connectez le même compte.
+3. Sur Android, importez des MP3 ou choisissez une playlist existante, touchez **Écrire le tag NFC**, puis approchez un tag NDEF compatible.
+4. Une playlist créée sur Android apparaît sur le PC. Ouvrez une carte et cliquez sur **Importer sur la carte** : le PC télécharge les MP3, vérifie leur empreinte et produit les fichiers FABA+ corrects.
+
+La carte SD n'est jamais remplacée par le cloud : elle reste un support explicite. Une synchronisation fusionne les contenus et ne supprime pas une playlist cloud simplement parce qu'elle est absente de la carte ouverte.
+
 ## Sécurité des données
 
-L'application fonctionne localement : aucun son et aucune donnée de bibliothèque ne sont envoyés sur Internet.
+Sans compte, toutes les opérations restent locales. Lorsque FABA Cloud est activé, les noms, pistes et MP3 personnels sont synchronisés via HTTPS sur `faba.bo1.be`. Le mot de passe est haché côté serveur avec Argon2 et n'est jamais conservé par les applications. Android chiffre le jeton de session avec Android Keystore ; le PC conserve un jeton révocable dans sa base locale. Le service applique une limite par piste et un quota par compte.
 
 Avant de remplacer ou retirer une figurine, son dossier complet est copié dans le répertoire de données de l'application :
 
@@ -74,7 +87,7 @@ Le journal peut être actualisé, copié pour un rapport de bug ou effacé direc
 
 ## Développement
 
-Le projet utilise [Tauri 2](https://v2.tauri.app/), React, TypeScript, Rust et SQLite.
+Le projet utilise [Tauri 2](https://v2.tauri.app/), React, TypeScript, Rust et SQLite pour le desktop, Axum/PostgreSQL pour le cloud, et Kotlin/Jetpack Compose pour Android.
 
 ```bash
 npm install
@@ -88,13 +101,15 @@ npm run check
 npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path cloud/Cargo.toml
+cd android && ./gradlew testDebugUnitTest assembleDebug
 ```
 
 Consultez [ARCHITECTURE.md](docs/ARCHITECTURE.md) pour le modèle de données et les garanties d'écriture, puis [CONTRIBUTING.md](CONTRIBUTING.md) avant de proposer une contribution.
 
 ## État et feuille de route
 
-La version `0.1.x` cible FABA+ et traite l'ancien FABA en lecture seule. Les prochaines étapes envisagées sont la restauration guidée des sauvegardes, la signature des installateurs, les mises à jour intégrées et, après davantage de validation sur matériel réel, l'édition sûre de l'ancien format chiffré.
+La version `0.2.x` cible FABA+, traite l'ancien FABA en lecture seule et ajoute la bibliothèque cloud complète avec l'application Android NFC. Les prochaines étapes envisagées sont la restauration guidée des sauvegardes et davantage de validation sur différents modèles de tags et téléphones.
 
 ## Crédits et licence
 

@@ -8,6 +8,8 @@ import {
   Check,
   ChevronRight,
   CircleHelp,
+  Cloud,
+  CloudOff,
   Copy,
   Database,
   Disc3,
@@ -16,6 +18,8 @@ import {
   HardDrive,
   Library,
   LoaderCircle,
+  LogIn,
+  LogOut,
   Music2,
   Pencil,
   Plus,
@@ -23,6 +27,7 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Trash2,
   Upload,
@@ -88,6 +93,39 @@ type DiagnosticReport = {
   path: string;
 };
 
+type CloudStatus = {
+  endpoint: string;
+  authenticated: boolean;
+  email: string | null;
+  displayName: string | null;
+  expiresAt: string | null;
+  lastSyncAt: string | null;
+};
+
+type CloudTrack = {
+  position: number;
+  label: string;
+  audioAvailable: boolean;
+  audioSizeBytes: number | null;
+  audioSha256: string | null;
+};
+
+type CloudPlaylist = {
+  figureId: string;
+  name: string;
+  nfcPayload: string;
+  trackCount: number;
+  tracks: CloudTrack[];
+  updatedAt: string;
+};
+
+type CloudLibrary = {
+  version: number;
+  playlists: CloudPlaylist[];
+  storageUsedBytes: number;
+  storageLimitBytes: number;
+};
+
 type Toast = { tone: "success" | "error" | "info"; message: string };
 
 const kindLabels: Record<CardKind, string> = {
@@ -108,6 +146,10 @@ function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [editorFigure, setEditorFigure] = useState<Figure | "new" | null>(null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [cloudOpen, setCloudOpen] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
+  const [cloudLibrary, setCloudLibrary] = useState<CloudLibrary | null>(null);
+  const [cloudBusy, setCloudBusy] = useState(false);
 
   const refreshSources = async () => {
     setSourceBusy(true);
@@ -125,8 +167,35 @@ function App() {
     }
   };
 
+  const refreshCloud = async (rootPath?: string, notify = false): Promise<boolean> => {
+    setCloudBusy(true);
+    try {
+      const status = await invoke<CloudStatus>("cloud_status");
+      setCloudStatus(status);
+      if (!status.authenticated) {
+        setCloudLibrary(null);
+        return false;
+      }
+      const library = rootPath
+        ? await invoke<CloudLibrary>("cloud_sync", { rootPath })
+        : await invoke<CloudLibrary>("cloud_library");
+      setCloudLibrary(library);
+      setCloudStatus(await invoke<CloudStatus>("cloud_status"));
+      if (notify) showToast("success", "Bibliothèque synchronisée avec FABA Cloud.");
+      return true;
+    } catch (error) {
+      if (notify) showToast("error", stringifyError(error));
+      return false;
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
   useEffect(() => {
-    if ("__TAURI_INTERNALS__" in window) void refreshSources();
+    if ("__TAURI_INTERNALS__" in window) {
+      void refreshSources();
+      void refreshCloud();
+    }
     else setSourceBusy(false);
   }, []);
 
@@ -148,6 +217,7 @@ function App() {
       setSelectedFigureId(result.figures[0]?.id ?? null);
       setQuery("");
       await refreshSources();
+      await refreshCloud(result.rootPath);
     } catch (error) {
       showToast("error", stringifyError(error));
     } finally {
@@ -193,6 +263,7 @@ function App() {
     );
     showToast("success", result.message);
     void refreshSources();
+    void refreshCloud(result.snapshot.rootPath);
   };
 
   const deleteSelected = async () => {
@@ -254,6 +325,7 @@ function App() {
       });
       setSnapshot(result);
       showToast("success", "Nom local enregistré.");
+      void refreshCloud(result.rootPath);
     } catch (error) {
       showToast("error", stringifyError(error));
     }
@@ -263,6 +335,37 @@ function App() {
     if (!selectedFigure) return;
     await navigator.clipboard.writeText(selectedFigure.nfcPayload);
     showToast("info", "Code NFC copié.");
+  };
+
+  const importCloudPlaylist = async (playlist: CloudPlaylist) => {
+    if (!snapshot || !editable) {
+      showToast("error", "Ouvrez d'abord une carte FABA+ accessible en écriture.");
+      return;
+    }
+    if (playlist.tracks.some((track) => !track.audioAvailable)) {
+      showToast("error", "Cette playlist cloud n'a pas encore tous ses fichiers audio.");
+      return;
+    }
+    const alreadyExists = snapshot.figures.some((figure) => figure.id === playlist.figureId);
+    if (alreadyExists) {
+      const accepted = await ask(
+        `K${playlist.figureId} existe déjà sur cette carte. La remplacer par la version cloud ?\n\nUne sauvegarde locale sera créée avant le remplacement.`,
+        { title: "Importer depuis FABA Cloud", kind: "warning" },
+      );
+      if (!accepted) return;
+    }
+    setBusy(true);
+    try {
+      const result = await invoke<MutationResult>("cloud_import_playlist", {
+        rootPath: snapshot.rootPath,
+        figureId: playlist.figureId,
+      });
+      handleMutation(result);
+    } catch (error) {
+      showToast("error", stringifyError(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const editable =
@@ -291,6 +394,9 @@ function App() {
           </button>
           <button className="nav-item" type="button" onClick={() => setDiagnosticsOpen(true)}>
             <Bug size={18} /> Diagnostic technique
+          </button>
+          <button className="nav-item" type="button" onClick={() => setCloudOpen(true)}>
+            {cloudStatus?.authenticated ? <Cloud size={18} /> : <CloudOff size={18} />} FABA Cloud
           </button>
         </nav>
 
@@ -352,10 +458,13 @@ function App() {
           </section>
         )}
 
-        <div className="sidebar-footer">
-          <ShieldCheck size={17} />
-          <span><strong>Sauvegardes automatiques</strong><small>Avant chaque modification</small></span>
-        </div>
+        <button className={`sidebar-footer cloud-footer ${cloudStatus?.authenticated ? "connected" : ""}`} type="button" onClick={() => setCloudOpen(true)}>
+          {cloudStatus?.authenticated ? <Cloud size={17} /> : <ShieldCheck size={17} />}
+          <span>
+            <strong>{cloudStatus?.authenticated ? "Bibliothèque synchronisée" : "Sauvegardes automatiques"}</strong>
+            <small>{cloudStatus?.authenticated ? cloudStatus.email : "Avant chaque modification"}</small>
+          </span>
+        </button>
       </aside>
 
       <main className="main-content">
@@ -365,6 +474,10 @@ function App() {
             <h1>{snapshot ? "Contenu de la carte" : "Bonjour 👋"}</h1>
           </div>
           <div className="topbar-actions">
+            <button className={`button account-button ${cloudStatus?.authenticated ? "connected" : "secondary"}`} type="button" onClick={() => setCloudOpen(true)}>
+              {cloudBusy ? <LoaderCircle className="spin" size={16} /> : cloudStatus?.authenticated ? <Cloud size={16} /> : <LogIn size={16} />}
+              {cloudStatus?.authenticated ? cloudStatus.displayName || "Mon compte" : "Se connecter"}
+            </button>
             {snapshot && (
               <button className="button secondary" type="button" onClick={rescan} disabled={busy}>
                 <RefreshCw size={16} className={busy ? "spin" : ""} /> Rescanner
@@ -383,12 +496,17 @@ function App() {
         </header>
 
         {!snapshot ? (
-          <WelcomePanel
-            devices={devices}
-            busy={busy}
-            onOpenCard={openCard}
-            onPickFolder={pickCardFolder}
-          />
+          <>
+            <WelcomePanel
+              devices={devices}
+              busy={busy}
+              onOpenCard={openCard}
+              onPickFolder={pickCardFolder}
+            />
+            {cloudStatus?.authenticated && cloudLibrary && (
+              <CloudLibraryPanel library={cloudLibrary} onSync={() => refreshCloud(undefined, true)} busy={cloudBusy} />
+            )}
+          </>
         ) : (
           <>
             <section className="card-summary">
@@ -404,6 +522,10 @@ function App() {
               </div>
               <div className="summary-stat"><strong>{snapshot.figures.length}</strong><span>figurines</span></div>
               <div className="summary-stat"><strong>{totalTracks(snapshot)}</strong><span>pistes</span></div>
+              <button className={`summary-stat cloud-summary ${cloudStatus?.authenticated ? "synced" : ""}`} type="button" onClick={() => cloudStatus?.authenticated ? void refreshCloud(snapshot.rootPath, true) : setCloudOpen(true)}>
+                {cloudBusy ? <LoaderCircle className="spin" size={18} /> : cloudStatus?.authenticated ? <Cloud size={18} /> : <CloudOff size={18} />}
+                <span>{cloudStatus?.authenticated ? "Cloud synchronisé" : "Cloud désactivé"}</span>
+              </button>
               <div className="summary-stat safe"><ShieldCheck size={18} /><span>{snapshot.writable ? "Écriture sécurisée" : "Lecture seule"}</span></div>
             </section>
 
@@ -412,6 +534,16 @@ function App() {
                 <AlertTriangle size={18} /><span>{warning}</span>
               </div>
             ))}
+
+            {cloudStatus?.authenticated && cloudLibrary && (
+              <CloudLibraryPanel
+                library={cloudLibrary}
+                onSync={() => refreshCloud(snapshot.rootPath, true)}
+                onImport={importCloudPlaylist}
+                cardWritable={Boolean(editable)}
+                busy={cloudBusy || busy}
+              />
+            )}
 
             <section className="workspace">
               <div className="library-panel">
@@ -555,7 +687,161 @@ function App() {
           onNotify={showToast}
         />
       )}
+
+      {cloudOpen && (
+        <CloudAccountModal
+          status={cloudStatus}
+          onClose={() => setCloudOpen(false)}
+          onStatus={setCloudStatus}
+          onRefresh={async () => {
+            return refreshCloud(snapshot?.rootPath, true);
+          }}
+          onLibrary={setCloudLibrary}
+          onNotify={showToast}
+        />
+      )}
     </div>
+  );
+}
+
+function CloudAccountModal({
+  status,
+  onClose,
+  onStatus,
+  onRefresh,
+  onLibrary,
+  onNotify,
+}: {
+  status: CloudStatus | null;
+  onClose: () => void;
+  onStatus: (status: CloudStatus) => void;
+  onRefresh: () => Promise<boolean>;
+  onLibrary: (library: CloudLibrary | null) => void;
+  onNotify: (tone: Toast["tone"], message: string) => void;
+}) {
+  const [registerMode, setRegisterMode] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (registerMode && displayName.trim().length === 0) {
+      onNotify("error", "Saisissez le nom à afficher.");
+      return;
+    }
+    if (password.length < 10) {
+      onNotify("error", "Le mot de passe doit contenir au moins 10 caractères.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const next = await invoke<CloudStatus>(registerMode ? "cloud_register" : "cloud_login", {
+        email,
+        password,
+        ...(registerMode ? { displayName } : {}),
+      });
+      setPassword("");
+      onStatus(next);
+      const synced = await onRefresh();
+      if (!synced) {
+        onNotify("error", "Compte connecté, mais la synchronisation a échoué. Vous pourrez la relancer sans ressaisir le mot de passe.");
+      }
+    } catch (error) {
+      onNotify("error", stringifyError(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const logout = async () => {
+    setLoading(true);
+    try {
+      const next = await invoke<CloudStatus>("cloud_logout");
+      onStatus(next);
+      onLibrary(null);
+      onNotify("success", "Compte déconnecté de cet ordinateur.");
+    } catch (error) {
+      onNotify("error", stringifyError(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal cloud-modal" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
+        <div className="modal-header">
+          <div><span className="modal-icon cloud-icon"><Cloud size={20} /></span><div><p>Bibliothèque partagée</p><h2 id="cloud-title">FABA Cloud</h2></div></div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Fermer"><X size={19} /></button>
+        </div>
+
+        {status?.authenticated ? (
+          <div className="cloud-account-body">
+            <div className="cloud-account-hero"><span><Cloud size={26} /></span><div><strong>{status.displayName}</strong><small>{status.email}</small></div></div>
+            <div className="cloud-info-grid">
+              <div><span>Serveur</span><strong>{status.endpoint.replace(/^https?:\/\//, "")}</strong></div>
+              <div><span>Dernière synchro</span><strong>{status.lastSyncAt ? formatDate(status.lastSyncAt) : "À effectuer"}</strong></div>
+            </div>
+            <div className="cloud-explainer"><Smartphone size={20} /><p>Playlists et MP3 sont synchronisés dans votre compte privé. Android peut ajouter des sons ; le PC les importe ensuite sur la carte SD au format FABA+.</p></div>
+            <div className="cloud-account-actions">
+              <button className="button secondary" type="button" onClick={logout} disabled={loading}><LogOut size={16} /> Déconnecter</button>
+              <button className="button primary" type="button" onClick={onRefresh} disabled={loading}>{loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Synchroniser maintenant</button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <div className="cloud-auth-body">
+              <div className="cloud-auth-intro"><Cloud size={24} /><div><strong>{registerMode ? "Créer mon compte" : "Retrouver ma bibliothèque"}</strong><p>Une seule connexion, puis la synchronisation devient automatique.</p></div></div>
+              {registerMode && <label><span>Nom affiché</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" maxLength={80} placeholder="Edwin" required /></label>}
+              <label><span>Adresse e-mail</span><input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="email" placeholder="vous@exemple.be" required /></label>
+              <label><span>Mot de passe</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete={registerMode ? "new-password" : "current-password"} minLength={10} placeholder="10 caractères minimum" required /></label>
+              <button className="button primary cloud-submit" type="submit" disabled={loading}>{loading ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}{registerMode ? "Créer et connecter" : "Se connecter"}</button>
+              <button className="link-button" type="button" onClick={() => setRegisterMode((current) => !current)}>{registerMode ? "J'ai déjà un compte" : "Créer un nouveau compte"}</button>
+              <small className="privacy-note"><ShieldCheck size={14} /> Le mot de passe n'est jamais conservé dans l'application.</small>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function CloudLibraryPanel({
+  library,
+  onSync,
+  onImport,
+  cardWritable,
+  busy,
+}: {
+  library: CloudLibrary;
+  onSync: () => Promise<unknown>;
+  onImport?: (playlist: CloudPlaylist) => Promise<void>;
+  cardWritable?: boolean;
+  busy: boolean;
+}) {
+  const completeCount = library.playlists.filter((playlist) => playlist.tracks.every((track) => track.audioAvailable)).length;
+  return (
+    <section className="cloud-library-panel">
+      <div className="cloud-library-heading">
+        <div><span><Cloud size={18} /></span><div><p>{completeCount}/{library.playlists.length} prêtes · {formatBytes(library.storageUsedBytes)}</p><h2>Ma bibliothèque cloud</h2></div></div>
+        <button className="button secondary" type="button" onClick={onSync} disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} Actualiser</button>
+      </div>
+      {library.playlists.length === 0 ? (
+        <div className="cloud-library-empty"><Smartphone size={26} /><p>Ouvrez une carte FABA+ pour envoyer automatiquement ses playlists dans votre compte.</p></div>
+      ) : (
+        <div className="cloud-playlist-grid">
+          {library.playlists.map((playlist) => (
+            <article key={playlist.figureId}>
+              <span className={`figure-art art-${Number(playlist.figureId) % 6}`}><Music2 size={24} /><small>K{playlist.figureId}</small></span>
+              <div><strong>{playlist.name}</strong><small>{playlist.trackCount} piste{playlist.trackCount > 1 ? "s" : ""} · {playlist.tracks.every((track) => track.audioAvailable) ? "audio complet" : "audio incomplet"}</small></div>
+              <div className="cloud-playlist-actions"><code>{playlist.nfcPayload}</code>{onImport && <button className="button secondary" type="button" onClick={() => void onImport(playlist)} disabled={busy || !cardWritable || playlist.tracks.some((track) => !track.audioAvailable)}><Download size={13} /> Importer sur la carte</button>}</div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -656,7 +942,7 @@ function WelcomePanel({
   return (
     <section className="welcome-panel">
       <div className="welcome-copy">
-        <span className="welcome-badge"><Sparkles size={14} /> Simple, local et sans cloud</span>
+        <span className="welcome-badge"><Sparkles size={14} /> Simple, local et synchronisé</span>
         <h2>Vos histoires.<br /><em>Votre FABA+.</em></h2>
         <p>Insérez la carte microSD de votre FABA+, puis organisez vos propres sons sans scripts, Docker ou ligne de commande.</p>
         <div className="welcome-actions">
@@ -671,7 +957,7 @@ function WelcomePanel({
         </div>
         <div className="trust-row">
           <span><ShieldCheck size={17} /> Sauvegarde avant écriture</span>
-          <span><Database size={17} /> Index local SQLite</span>
+          <span><Database size={17} /> Local hors ligne + cloud</span>
           <span><HardDrive size={17} /> Windows · macOS · Linux</span>
         </div>
       </div>
@@ -795,7 +1081,7 @@ function FigureEditor({
             <div className="audio-picker">
               <div className="picker-heading"><div><h3>Pistes audio</h3><p>L'ordre ci-dessous sera l'ordre de lecture.</p></div><button className="button secondary" type="button" onClick={pickAudio}><FolderOpen size={16} /> Choisir des MP3</button></div>
               {audioPaths.length === 0 ? (
-                <button className="drop-zone" type="button" onClick={pickAudio}><span><Upload size={25} /></span><strong>Sélectionner vos fichiers MP3</strong><small>1 à 99 pistes · aucun fichier n'est envoyé en ligne</small></button>
+                <button className="drop-zone" type="button" onClick={pickAudio}><span><Upload size={25} /></span><strong>Sélectionner vos fichiers MP3</strong><small>1 à 99 pistes · synchronisation cloud après enregistrement</small></button>
               ) : (
                 <div className="selected-tracks">
                   {audioPaths.map((path, index) => (
@@ -839,6 +1125,13 @@ function formatBytes(value: number) {
   const units = ["o", "Ko", "Mo", "Go", "To"];
   const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
   return `${(value / 1024 ** index).toLocaleString("fr-BE", { maximumFractionDigits: index ? 1 : 0 })} ${units[index]}`;
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("fr-BE", { dateStyle: "short", timeStyle: "short" });
 }
 
 function lastPathPart(path: string) {

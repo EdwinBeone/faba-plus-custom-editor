@@ -11,6 +11,12 @@ node_modules
 dist
 dist-ssr
 src-tauri/target
+cloud/target
+cloud/.env
+cloud/backups
+android/.gradle
+android/local.properties
+android/**/build
 *.local
 
 # Editor directories and files

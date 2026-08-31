@@ -1,5 +1,15 @@
 # Journal des versions
 
+## 0.2.0
+
+- ajout de FABA Cloud avec comptes, sessions révocables et bibliothèque complète synchronisée ;
+- stockage des MP3 avec quota, limite par piste et vérification SHA-256 ;
+- fusion non destructive entre les cartes SD et la bibliothèque centrale ;
+- import d'une playlist cloud complète vers la carte via l'application desktop ;
+- ajout de l'application Android native pour importer, renommer, remplacer ou supprimer des playlists ;
+- écriture NFC Android en un clic, limitée aux IDs `2000–8999`, avec vérification NDEF après écriture ;
+- ajout du déploiement Docker/PostgreSQL, du vhost Apache et des builds Android dans la CI.
+
 ## 0.1.3
 
 - correction du format audio FABA+ validé sur matériel : `00.faba`, `01.faba`, etc. ;

@@ -2,7 +2,7 @@ use crate::domain::{CardKind, CardSnapshot};
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,28 @@ pub struct RecentCard {
     pub label: String,
     pub kind: String,
     pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSession {
+    pub endpoint: String,
+    pub email: String,
+    pub display_name: String,
+    pub token: String,
+    pub expires_at: String,
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudStatus {
+    pub endpoint: String,
+    pub authenticated: bool,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub expires_at: Option<String>,
+    pub last_sync_at: Option<String>,
 }
 
 impl LibraryDatabase {
@@ -56,6 +78,15 @@ impl LibraryDatabase {
                label TEXT NOT NULL,
                PRIMARY KEY (root_path, figure_id, track_index),
                FOREIGN KEY (root_path, figure_id) REFERENCES figures(root_path, figure_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS cloud_session (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               endpoint TEXT NOT NULL,
+               email TEXT NOT NULL,
+               display_name TEXT NOT NULL,
+               token TEXT NOT NULL,
+               expires_at TEXT NOT NULL,
+               last_sync_at TEXT
              );",
         )?;
         Ok(())
@@ -170,6 +201,88 @@ impl LibraryDatabase {
             .filter_map(|row| row.ok())
             .collect();
         Ok(cards)
+    }
+
+    pub fn cloud_session(&self) -> Result<Option<CloudSession>> {
+        let connection = self.connection()?;
+        let result = connection.query_row(
+            "SELECT endpoint, email, display_name, token, expires_at, last_sync_at
+             FROM cloud_session WHERE id=1",
+            [],
+            |row| {
+                Ok(CloudSession {
+                    endpoint: row.get(0)?,
+                    email: row.get(1)?,
+                    display_name: row.get(2)?,
+                    token: row.get(3)?,
+                    expires_at: row.get(4)?,
+                    last_sync_at: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(session) => Ok(Some(session)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn cloud_status(&self, default_endpoint: &str) -> Result<CloudStatus> {
+        Ok(match self.cloud_session()? {
+            Some(session) => CloudStatus {
+                endpoint: session.endpoint,
+                authenticated: true,
+                email: Some(session.email),
+                display_name: Some(session.display_name),
+                expires_at: Some(session.expires_at),
+                last_sync_at: session.last_sync_at,
+            },
+            None => CloudStatus {
+                endpoint: default_endpoint.to_owned(),
+                authenticated: false,
+                email: None,
+                display_name: None,
+                expires_at: None,
+                last_sync_at: None,
+            },
+        })
+    }
+
+    pub fn save_cloud_session(&self, session: &CloudSession) -> Result<()> {
+        self.connection()?.execute(
+            "INSERT INTO cloud_session(id, endpoint, email, display_name, token, expires_at, last_sync_at)
+             VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               endpoint=excluded.endpoint,
+               email=excluded.email,
+               display_name=excluded.display_name,
+               token=excluded.token,
+               expires_at=excluded.expires_at,
+               last_sync_at=excluded.last_sync_at",
+            params![
+                session.endpoint,
+                session.email,
+                session.display_name,
+                session.token,
+                session.expires_at,
+                session.last_sync_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_cloud_synced(&self) -> Result<()> {
+        self.connection()?.execute(
+            "UPDATE cloud_session SET last_sync_at=?1 WHERE id=1",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_cloud_session(&self) -> Result<()> {
+        self.connection()?
+            .execute("DELETE FROM cloud_session WHERE id=1", [])?;
+        Ok(())
     }
 }
 

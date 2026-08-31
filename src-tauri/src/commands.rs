@@ -1,12 +1,17 @@
+use crate::cloud::{self, CloudLibrary};
 use crate::diagnostics::{DiagnosticLogger, DiagnosticReport};
 use crate::domain::{
     delete_faba_plus_figure, ensure_editable, export_figure as export_figure_to, looks_like_card,
     require_figure, scan_card as scan_card_path, write_faba_plus_figure_with_trace, CardKind,
     CardSnapshot,
 };
-use crate::storage::{LibraryDatabase, RecentCard};
+use crate::storage::{CloudStatus, LibraryDatabase, RecentCard};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use sysinfo::Disks;
 use tauri::{AppHandle, Manager, State};
 
@@ -319,6 +324,185 @@ pub fn export_figure(
         ),
     );
     Ok(exported)
+}
+
+#[tauri::command]
+pub fn cloud_status(state: State<'_, AppState>) -> Result<CloudStatus, String> {
+    cloud::status(&state.database).map_err(display_error)
+}
+
+#[tauri::command]
+pub async fn cloud_register(
+    email: String,
+    password: String,
+    display_name: String,
+    state: State<'_, AppState>,
+) -> Result<CloudStatus, String> {
+    state.diagnostics.info(
+        "cloud.register.start",
+        format!("endpoint={}", cloud::endpoint()),
+    );
+    let result = cloud::register(&state.database, &email, &password, &display_name)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.register.error", error))?;
+    state
+        .diagnostics
+        .info("cloud.register.success", "compte connecté");
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn cloud_login(
+    email: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<CloudStatus, String> {
+    state.diagnostics.info(
+        "cloud.login.start",
+        format!("endpoint={}", cloud::endpoint()),
+    );
+    let result = cloud::login(&state.database, &email, &password)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.login.error", error))?;
+    state
+        .diagnostics
+        .info("cloud.login.success", "compte connecté");
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn cloud_logout(state: State<'_, AppState>) -> Result<CloudStatus, String> {
+    let result = cloud::logout(&state.database)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.logout.error", error))?;
+    state
+        .diagnostics
+        .info("cloud.logout.success", "session locale supprimée");
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn cloud_library(state: State<'_, AppState>) -> Result<CloudLibrary, String> {
+    cloud::library(&state.database)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.library.error", error))
+}
+
+#[tauri::command]
+pub async fn cloud_sync(
+    root_path: String,
+    state: State<'_, AppState>,
+) -> Result<CloudLibrary, String> {
+    state
+        .diagnostics
+        .info("cloud.sync.start", format!("card={root_path}"));
+    let snapshot = load_snapshot(&root_path, &state.database)
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.sync.error", error))?;
+    let result = cloud::sync_snapshot(&state.database, &snapshot)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.sync.error", error))?;
+    state.diagnostics.info(
+        "cloud.sync.success",
+        format!(
+            "playlists={} version={}",
+            result.playlists.len(),
+            result.version
+        ),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn cloud_import_playlist(
+    app: AppHandle,
+    root_path: String,
+    figure_id: String,
+    state: State<'_, AppState>,
+) -> Result<MutationResult, String> {
+    state.diagnostics.info(
+        "cloud.import.start",
+        format!("card={root_path} figure=K{figure_id}"),
+    );
+    let before = scan_card_path(Path::new(&root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+    ensure_editable(&before)
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+    let backup_path = backup_root(&app, &before.root_path)
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let download_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(display_error)?
+        .join("cloud-imports")
+        .join(format!("K{figure_id}-{nonce}"));
+    let result = async {
+        let (playlist, audio_paths) =
+            cloud::download_playlist(&state.database, &figure_id, &download_dir)
+                .await
+                .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        let trace = |step: &str| {
+            state.diagnostics.info(
+                "cloud.import.step",
+                format!(
+                    "card={} figure=K{} step={step}",
+                    before.root_path, figure_id
+                ),
+            );
+        };
+        let backup = write_faba_plus_figure_with_trace(
+            Path::new(&before.root_path),
+            &figure_id,
+            &audio_paths,
+            &backup_path,
+            &trace,
+        )
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        let mut snapshot = scan_card_path(Path::new(&before.root_path))
+            .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        state
+            .database
+            .sync_snapshot(&snapshot)
+            .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        state
+            .database
+            .set_figure_name(&snapshot.root_path, &figure_id, Some(&playlist.name))
+            .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        let labels = playlist
+            .tracks
+            .iter()
+            .map(|track| track.label.clone())
+            .collect::<Vec<_>>();
+        state
+            .database
+            .set_track_labels(&snapshot.root_path, &figure_id, &labels)
+            .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        state
+            .database
+            .decorate_snapshot(&mut snapshot)
+            .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
+        Ok(MutationResult {
+            snapshot,
+            backup_path: backup.map(|path| path.to_string_lossy().into_owned()),
+            message: if before.figures.iter().any(|figure| figure.id == figure_id) {
+                "Playlist cloud importée ; l'ancienne version a été sauvegardée.".into()
+            } else {
+                "Playlist cloud importée sur la carte.".into()
+            },
+        })
+    }
+    .await;
+    let _ = fs::remove_dir_all(&download_dir);
+    if result.is_ok() {
+        state.diagnostics.info(
+            "cloud.import.success",
+            format!("card={} figure=K{figure_id}", before.root_path),
+        );
+    }
+    result
 }
 
 fn load_snapshot(path: &str, database: &LibraryDatabase) -> Result<CardSnapshot, String> {

@@ -2,7 +2,7 @@
 
 ## Vue d'ensemble
 
-FABA+ Custom Editor sépare l'interface, les opérations de carte et les métadonnées locales.
+FABA+ Custom Editor sépare l'interface, les opérations de carte, la base locale et la bibliothèque cloud.
 
 ```text
 React / TypeScript
@@ -10,8 +10,13 @@ React / TypeScript
         ▼
 Rust ── scan, validation, écriture atomique, sauvegardes
   │
-  ├── carte microSD : PLAYER/Kxxxx/CPxx.faba + info
-  └── SQLite local : cartes, noms de figurines, noms de pistes
+  ├── carte microSD : PLAYER/Kxxxx/00.faba + info
+  ├── SQLite local : cartes, noms de figurines, noms de pistes, session cloud
+  └── HTTPS ── Axum ── PostgreSQL + volume audio privé
+
+Android / Jetpack Compose
+  ├── HTTPS ── même compte et même bibliothèque
+  └── Android NFC ── écriture et vérification NDEF
 ```
 
 Le frontend ne possède pas d'accès général en écriture au système de fichiers. Il transmet les chemins choisis dans des boîtes de dialogue natives aux commandes Rust, qui valident les identifiants, extensions et limites avant toute mutation.
@@ -56,10 +61,21 @@ SQLite stocke uniquement :
 - les noms locaux donnés aux figurines ;
 - les libellés des pistes importées.
 
-Les fichiers audio restent sur la carte. Le mode WAL protège l'intégrité de l'index en cas d'arrêt brutal de l'application.
+Le mode WAL protège l'intégrité de l'index en cas d'arrêt brutal. Sans connexion cloud, les fichiers audio restent exclusivement sur la carte.
+
+## Bibliothèque cloud
+
+Le cloud conserve les métadonnées dans PostgreSQL et les MP3 dans un volume Docker distinct. Chaque piste possède sa taille et son empreinte SHA-256. Le desktop compare cette empreinte avant un envoi et la revérifie après un téléchargement. Les suppressions sont explicites : synchroniser une carte incomplète ne supprime pas les playlists créées depuis Android.
+
+Les sessions sont des jetons opaques ; seul leur SHA-256 est conservé côté serveur. Les mots de passe utilisent Argon2 et le nombre de calculs simultanés est borné. L'API limite les corps JSON, les pistes à 200 Mo, chaque compte à 5 Go et le service à 50 Go par défaut. Le conteneur API s'exécute sans privilèges, avec un système de fichiers racine en lecture seule ; seul le volume audio est inscriptible.
+
+## Flux Android
+
+Android sélectionne des documents `audio/mpeg` via le sélecteur système, crée ou met à jour la playlist par API, puis envoie chaque piste. Le jeton local est chiffré par une clé AES-GCM non exportable d'Android Keystore. Pour le NFC, l'application n'accepte que les payloads correspondant exactement à l'ID `2000–8999`, écrit un enregistrement texte NDEF et le relit avant d'annoncer le succès.
 
 ## Limites actuelles
 
-- L'ancien format FABA requiert la modification d'étiquettes ID3 et une transformation binaire. Il est scanné mais jamais modifié dans la version 0.1.
-- L'application n'écrit pas directement les tags NFC ; elle fournit le payload à copier dans une application NFC dédiée.
+- L'ancien format FABA requiert la modification d'étiquettes ID3 et une transformation binaire. Il est scanné mais jamais modifié dans la version 0.2.
+- L'écriture NFC directe est disponible sur Android ; le desktop continue d'afficher et de copier le payload.
 - Les installateurs de développement communautaire ne sont pas signés.
+- L'API accepte uniquement des MP3 ; les autres formats audio ne sont pas encore transcodés automatiquement.

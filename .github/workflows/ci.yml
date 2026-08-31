@@ -48,3 +48,29 @@ jobs:
       - run: npm ci
       - name: Run Rust tests on Windows
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  cloud-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cloud
+      - run: cargo fmt --manifest-path cloud/Cargo.toml -- --check
+      - run: cargo test --manifest-path cloud/Cargo.toml
+      - run: cargo clippy --manifest-path cloud/Cargo.toml --all-targets -- -D warnings
+
+  android-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew testDebugUnitTest assembleDebug --no-daemon
+        working-directory: android

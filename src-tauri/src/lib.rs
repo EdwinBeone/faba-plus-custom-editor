@@ -1,3 +1,4 @@
+mod cloud;
 mod commands;
 mod diagnostics;
 mod domain;
@@ -43,7 +44,14 @@ pub fn run() {
             commands::save_figure,
             commands::rename_figure,
             commands::delete_figure,
-            commands::export_figure
+            commands::export_figure,
+            commands::cloud_status,
+            commands::cloud_register,
+            commands::cloud_login,
+            commands::cloud_logout,
+            commands::cloud_library,
+            commands::cloud_sync,
+            commands::cloud_import_playlist
         ])
         .run(tauri::generate_context!())
         .expect("error while running FABA+ Custom Editor");

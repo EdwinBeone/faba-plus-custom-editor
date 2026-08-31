@@ -1,0 +1,47 @@
+services:
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8787
+      DATABASE_URL: postgresql://faba:${POSTGRES_PASSWORD}@postgres:5432/faba
+      SESSION_DAYS: ${SESSION_DAYS:-90}
+      AUDIO_STORAGE_DIR: /data/audio
+      MAX_TRACK_BYTES: ${MAX_TRACK_BYTES:-209715200}
+      MAX_ACCOUNT_BYTES: ${MAX_ACCOUNT_BYTES:-5368709120}
+      MAX_TOTAL_BYTES: ${MAX_TOTAL_BYTES:-53687091200}
+      RUST_LOG: faba_cloud=info,tower_http=info
+    ports:
+      - "127.0.0.1:${FABA_PORT:-8787}:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - audio_data:/data/audio
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: faba
+      POSTGRES_USER: faba
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faba -d faba"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  audio_data:

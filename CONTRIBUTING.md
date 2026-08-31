@@ -16,6 +16,9 @@ npm run check
 npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo fmt --manifest-path cloud/Cargo.toml -- --check
+cargo test --manifest-path cloud/Cargo.toml
+cd android && ./gradlew testDebugUnitTest assembleDebug
 ```
 
 Les changements de format doivent préserver les trois garanties fondamentales : validation stricte, sauvegarde avant mutation et restauration de l'état précédent en cas d'échec.
