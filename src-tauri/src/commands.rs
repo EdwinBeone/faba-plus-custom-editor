@@ -1,17 +1,14 @@
-use crate::cloud::{self, CloudLibrary};
+use crate::cloud;
 use crate::diagnostics::{DiagnosticLogger, DiagnosticReport};
 use crate::domain::{
     delete_faba_plus_figure, ensure_editable, export_figure as export_figure_to, looks_like_card,
     require_figure, scan_card as scan_card_path, write_faba_plus_figure_with_trace, CardKind,
     CardSnapshot,
 };
+use crate::managed::{self, ManagedLibrary};
 use crate::storage::{CloudStatus, LibraryDatabase, RecentCard};
 use serde::Serialize;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::{Path, PathBuf};
 use sysinfo::Disks;
 use tauri::{AppHandle, Manager, State};
 
@@ -19,6 +16,7 @@ use tauri::{AppHandle, Manager, State};
 pub struct AppState {
     pub database: LibraryDatabase,
     pub diagnostics: DiagnosticLogger,
+    pub library_root: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,6 +343,8 @@ pub async fn cloud_register(
     let result = cloud::register(&state.database, &email, &password, &display_name)
         .await
         .map_err(|error| logged_error(&state.diagnostics, "cloud.register.error", error))?;
+    managed::adopt_unassigned_library(&state.database, &state.library_root)
+        .map_err(|error| logged_error(&state.diagnostics, "library.adopt.error", error))?;
     state
         .diagnostics
         .info("cloud.register.success", "compte connecté");
@@ -364,6 +364,8 @@ pub async fn cloud_login(
     let result = cloud::login(&state.database, &email, &password)
         .await
         .map_err(|error| logged_error(&state.diagnostics, "cloud.login.error", error))?;
+    managed::adopt_unassigned_library(&state.database, &state.library_root)
+        .map_err(|error| logged_error(&state.diagnostics, "library.adopt.error", error))?;
     state
         .diagnostics
         .info("cloud.login.success", "compte connecté");
@@ -382,25 +384,23 @@ pub async fn cloud_logout(state: State<'_, AppState>) -> Result<CloudStatus, Str
 }
 
 #[tauri::command]
-pub async fn cloud_library(state: State<'_, AppState>) -> Result<CloudLibrary, String> {
-    cloud::library(&state.database)
+pub async fn cloud_library(state: State<'_, AppState>) -> Result<ManagedLibrary, String> {
+    let library = managed::synchronize(&state.database, &state.library_root)
         .await
-        .map_err(|error| logged_error(&state.diagnostics, "cloud.library.error", error))
+        .map_err(|error| logged_error(&state.diagnostics, "cloud.library.error", error))?;
+    log_library_mode(&state.diagnostics, "cloud.library.offline", &library);
+    Ok(library)
 }
 
 #[tauri::command]
-pub async fn cloud_sync(
-    root_path: String,
-    state: State<'_, AppState>,
-) -> Result<CloudLibrary, String> {
+pub async fn cloud_sync(state: State<'_, AppState>) -> Result<ManagedLibrary, String> {
     state
         .diagnostics
-        .info("cloud.sync.start", format!("card={root_path}"));
-    let snapshot = load_snapshot(&root_path, &state.database)
-        .map_err(|error| logged_error(&state.diagnostics, "cloud.sync.error", error))?;
-    let result = cloud::sync_snapshot(&state.database, &snapshot)
+        .info("cloud.sync.start", "bibliothèque locale");
+    let result = managed::synchronize(&state.database, &state.library_root)
         .await
         .map_err(|error| logged_error(&state.diagnostics, "cloud.sync.error", error))?;
+    log_library_mode(&state.diagnostics, "cloud.sync.offline", &result);
     state.diagnostics.info(
         "cloud.sync.success",
         format!(
@@ -429,20 +429,9 @@ pub async fn cloud_import_playlist(
         .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
     let backup_path = backup_root(&app, &before.root_path)
         .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_nanos())
-        .unwrap_or_default();
-    let download_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(display_error)?
-        .join("cloud-imports")
-        .join(format!("K{figure_id}-{nonce}"));
-    let result = async {
+    let result = (|| {
         let (playlist, audio_paths) =
-            cloud::download_playlist(&state.database, &figure_id, &download_dir)
-                .await
+            managed::playlist_audio_paths(&state.database, &state.library_root, &figure_id)
                 .map_err(|error| logged_error(&state.diagnostics, "cloud.import.error", error))?;
         let trace = |step: &str| {
             state.diagnostics.info(
@@ -488,14 +477,12 @@ pub async fn cloud_import_playlist(
             snapshot,
             backup_path: backup.map(|path| path.to_string_lossy().into_owned()),
             message: if before.figures.iter().any(|figure| figure.id == figure_id) {
-                "Playlist cloud importée ; l'ancienne version a été sauvegardée.".into()
+                "Playlist écrite ; l'ancienne version a été sauvegardée.".into()
             } else {
-                "Playlist cloud importée sur la carte.".into()
+                "Playlist écrite sur la carte.".into()
             },
         })
-    }
-    .await;
-    let _ = fs::remove_dir_all(&download_dir);
+    })();
     if result.is_ok() {
         state.diagnostics.info(
             "cloud.import.success",
@@ -503,6 +490,175 @@ pub async fn cloud_import_playlist(
         );
     }
     result
+}
+
+#[tauri::command]
+pub async fn library_import_batch(
+    audio_paths: Vec<String>,
+    mode: String,
+    playlist_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ManagedLibrary, String> {
+    state.diagnostics.info(
+        "library.import.start",
+        format!("mode={mode} files={}", audio_paths.len()),
+    );
+    let result = managed::import_batch(
+        &state.database,
+        &state.library_root,
+        audio_paths,
+        &mode,
+        playlist_name.as_deref(),
+    )
+    .await
+    .map_err(|error| logged_error(&state.diagnostics, "library.import.error", error))?;
+    log_library_mode(&state.diagnostics, "library.import.offline", &result);
+    state.diagnostics.info(
+        "library.import.success",
+        format!(
+            "playlists={} pending={}",
+            result.playlists.len(),
+            result.pending_changes
+        ),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn library_replace_playlist(
+    figure_id: String,
+    audio_paths: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<ManagedLibrary, String> {
+    state.diagnostics.info(
+        "library.replace.start",
+        format!("figure=K{figure_id} files={}", audio_paths.len()),
+    );
+    let library = managed::replace_playlist(
+        &state.database,
+        &state.library_root,
+        &figure_id,
+        audio_paths,
+    )
+    .await
+    .map_err(|error| logged_error(&state.diagnostics, "library.replace.error", error))?;
+    log_library_mode(&state.diagnostics, "library.replace.offline", &library);
+    Ok(library)
+}
+
+#[tauri::command]
+pub async fn library_rename_playlist(
+    figure_id: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<ManagedLibrary, String> {
+    state
+        .diagnostics
+        .info("library.rename.start", format!("figure=K{figure_id}"));
+    let library = managed::rename_playlist(&state.database, &state.library_root, &figure_id, &name)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "library.rename.error", error))?;
+    log_library_mode(&state.diagnostics, "library.rename.offline", &library);
+    Ok(library)
+}
+
+#[tauri::command]
+pub async fn library_delete_playlist(
+    figure_id: String,
+    state: State<'_, AppState>,
+) -> Result<ManagedLibrary, String> {
+    state
+        .diagnostics
+        .info("library.delete.start", format!("figure=K{figure_id}"));
+    let library = managed::delete_playlist(&state.database, &state.library_root, &figure_id)
+        .await
+        .map_err(|error| logged_error(&state.diagnostics, "library.delete.error", error))?;
+    log_library_mode(&state.diagnostics, "library.delete.offline", &library);
+    Ok(library)
+}
+
+#[tauri::command]
+pub fn sync_library_to_card(
+    app: AppHandle,
+    root_path: String,
+    state: State<'_, AppState>,
+) -> Result<MutationResult, String> {
+    state
+        .diagnostics
+        .info("card.library_sync.start", format!("card={root_path}"));
+    let before = scan_card_path(Path::new(&root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    ensure_editable(&before)
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    let playlists = managed::all_playlist_audio_paths(&state.database, &state.library_root)
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    let backup_path = backup_root(&app, &before.root_path)
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    let mut last_backup = None;
+    for (playlist, audio_paths) in &playlists {
+        let trace = |step: &str| {
+            state.diagnostics.info(
+                "card.library_sync.step",
+                format!(
+                    "card={} figure=K{} step={step}",
+                    before.root_path, playlist.figure_id
+                ),
+            );
+        };
+        let backup = write_faba_plus_figure_with_trace(
+            Path::new(&before.root_path),
+            &playlist.figure_id,
+            audio_paths,
+            &backup_path,
+            &trace,
+        )
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+        if backup.is_some() {
+            last_backup = backup;
+        }
+    }
+
+    let mut snapshot = scan_card_path(Path::new(&before.root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    state
+        .database
+        .sync_snapshot(&snapshot)
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    for (playlist, _) in &playlists {
+        state
+            .database
+            .set_figure_name(
+                &snapshot.root_path,
+                &playlist.figure_id,
+                Some(&playlist.name),
+            )
+            .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+        let labels = playlist
+            .tracks
+            .iter()
+            .map(|track| track.label.clone())
+            .collect::<Vec<_>>();
+        state
+            .database
+            .set_track_labels(&snapshot.root_path, &playlist.figure_id, &labels)
+            .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    }
+    state
+        .database
+        .decorate_snapshot(&mut snapshot)
+        .map_err(|error| logged_error(&state.diagnostics, "card.library_sync.error", error))?;
+    state.diagnostics.info(
+        "card.library_sync.success",
+        format!("card={} playlists={}", snapshot.root_path, playlists.len()),
+    );
+    Ok(MutationResult {
+        snapshot,
+        backup_path: last_backup.map(|path| path.to_string_lossy().into_owned()),
+        message: format!(
+            "{} playlist(s) synchronisée(s). Les autres contenus de la carte ont été conservés.",
+            playlists.len()
+        ),
+    })
 }
 
 fn load_snapshot(path: &str, database: &LibraryDatabase) -> Result<CardSnapshot, String> {
@@ -538,4 +694,12 @@ fn logged_error(
     let message = format!("{error:#}");
     diagnostics.error(event, &message);
     message
+}
+
+fn log_library_mode(diagnostics: &DiagnosticLogger, event: &str, library: &ManagedLibrary) {
+    if let Some(error) = &library.last_error {
+        diagnostics.error(event, error);
+    } else if library.offline {
+        diagnostics.info(event, "aucune session cloud ; cache local actif");
+    }
 }

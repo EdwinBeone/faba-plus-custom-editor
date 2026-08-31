@@ -1,5 +1,16 @@
 # Journal des versions
 
+## 0.3.0
+
+- la bibliothèque locale devient l'espace de travail principal, même sans carte SD et sans connexion cloud ;
+- ajout, renommage, remplacement, suppression et écoute des playlists directement depuis le PC ;
+- cache audio complet avec synchronisation cloud différée lorsque le serveur est indisponible ;
+- import multiple par sélection ou glisser-déposer, avec une playlist par MP3 ou une playlist regroupée ;
+- génération automatique d'identifiants personnalisés libres entre `2000` et `8999` ;
+- ajout du bouton **Synchroniser la carte** : les IDs identiques sont remplacés avec sauvegarde, sans supprimer les autres contenus présents sur la SD ;
+- correction des marges système Android pour ne plus passer sous la barre d'état ;
+- arrêt de la session d'écriture NFC Android après une seule détection, afin d'éviter les écritures et messages de succès en boucle.
+
 ## 0.2.0
 
 - ajout de FABA Cloud avec comptes, sessions révocables et bibliothèque complète synchronisée ;

@@ -42,6 +42,31 @@ pub struct CloudStatus {
     pub last_sync_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ManagedTrackRecord {
+    pub position: u16,
+    pub label: String,
+    pub audio_size_bytes: u64,
+    pub audio_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedPlaylistRecord {
+    pub figure_id: String,
+    pub name: String,
+    pub updated_at: String,
+    pub dirty: bool,
+    pub needs_audio_upload: bool,
+    pub deleted: bool,
+    pub tracks: Vec<ManagedTrackRecord>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ManagedLibraryState {
+    pub version: i64,
+    pub storage_limit_bytes: u64,
+}
+
 impl LibraryDatabase {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -87,6 +112,36 @@ impl LibraryDatabase {
                token TEXT NOT NULL,
                expires_at TEXT NOT NULL,
                last_sync_at TEXT
+             );
+             CREATE TABLE IF NOT EXISTS managed_playlists (
+               owner TEXT NOT NULL,
+               figure_id TEXT NOT NULL,
+               name TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               dirty INTEGER NOT NULL DEFAULT 1,
+               needs_audio_upload INTEGER NOT NULL DEFAULT 1,
+               deleted INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (owner, figure_id)
+             );
+             CREATE TABLE IF NOT EXISTS managed_tracks (
+               owner TEXT NOT NULL,
+               figure_id TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               label TEXT NOT NULL,
+               audio_size_bytes INTEGER NOT NULL,
+               audio_sha256 TEXT NOT NULL,
+               PRIMARY KEY (owner, figure_id, position),
+               FOREIGN KEY (owner, figure_id) REFERENCES managed_playlists(owner, figure_id)
+                 ON DELETE CASCADE ON UPDATE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS managed_library_state (
+               owner TEXT PRIMARY KEY,
+               version INTEGER NOT NULL DEFAULT 0,
+               storage_limit_bytes INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS library_settings (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
              );",
         )?;
         Ok(())
@@ -249,7 +304,9 @@ impl LibraryDatabase {
     }
 
     pub fn save_cloud_session(&self, session: &CloudSession) -> Result<()> {
-        self.connection()?.execute(
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "INSERT INTO cloud_session(id, endpoint, email, display_name, token, expires_at, last_sync_at)
              VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
@@ -268,6 +325,12 @@ impl LibraryDatabase {
                 session.last_sync_at,
             ],
         )?;
+        transaction.execute(
+            "INSERT INTO library_settings(key, value) VALUES('active_owner', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![session.email.to_ascii_lowercase()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -282,6 +345,249 @@ impl LibraryDatabase {
     pub fn clear_cloud_session(&self) -> Result<()> {
         self.connection()?
             .execute("DELETE FROM cloud_session WHERE id=1", [])?;
+        Ok(())
+    }
+
+    pub fn active_library_owner(&self) -> Result<String> {
+        if let Some(session) = self.cloud_session()? {
+            return Ok(session.email.to_ascii_lowercase());
+        }
+        let connection = self.connection()?;
+        Ok(connection
+            .query_row(
+                "SELECT value FROM library_settings WHERE key='active_owner'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| "local".into()))
+    }
+
+    pub fn adopt_unassigned_library(&self, owner: &str) -> Result<bool> {
+        let normalized_owner = owner.to_ascii_lowercase();
+        if normalized_owner == "local" {
+            return Ok(false);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let target_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM managed_playlists WHERE owner=?1",
+            params![normalized_owner],
+            |row| row.get(0),
+        )?;
+        let local_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM managed_playlists WHERE owner='local'",
+            [],
+            |row| row.get(0),
+        )?;
+        let adopted = target_count == 0 && local_count > 0;
+        if adopted {
+            transaction.execute(
+                "UPDATE managed_playlists SET owner=?1 WHERE owner='local'",
+                params![normalized_owner],
+            )?;
+            let local_state_count: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM managed_library_state WHERE owner='local'",
+                [],
+                |row| row.get(0),
+            )?;
+            if local_state_count > 0 {
+                transaction.execute(
+                    "DELETE FROM managed_library_state WHERE owner=?1",
+                    params![normalized_owner],
+                )?;
+                transaction.execute(
+                    "UPDATE managed_library_state SET owner=?1 WHERE owner='local'",
+                    params![normalized_owner],
+                )?;
+            }
+        }
+        transaction.execute(
+            "INSERT INTO library_settings(key, value) VALUES('active_owner', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![normalized_owner],
+        )?;
+        transaction.commit()?;
+        Ok(adopted)
+    }
+
+    pub fn managed_playlist_count(&self, owner: &str) -> Result<u64> {
+        let count = self.connection()?.query_row(
+            "SELECT COUNT(*) FROM managed_playlists WHERE owner=?1",
+            params![owner],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    pub fn managed_playlists(
+        &self,
+        owner: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<ManagedPlaylistRecord>> {
+        let connection = self.connection()?;
+        let sql = if include_deleted {
+            "SELECT figure_id, name, updated_at, dirty, needs_audio_upload, deleted
+             FROM managed_playlists WHERE owner=?1 ORDER BY figure_id"
+        } else {
+            "SELECT figure_id, name, updated_at, dirty, needs_audio_upload, deleted
+             FROM managed_playlists WHERE owner=?1 AND deleted=0 ORDER BY figure_id"
+        };
+        let mut statement = connection.prepare(sql)?;
+        let rows = statement
+            .query_map(params![owner], |row| {
+                Ok(ManagedPlaylistRecord {
+                    figure_id: row.get(0)?,
+                    name: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    dirty: row.get::<_, i64>(3)? != 0,
+                    needs_audio_upload: row.get::<_, i64>(4)? != 0,
+                    deleted: row.get::<_, i64>(5)? != 0,
+                    tracks: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+
+        let mut playlists = Vec::with_capacity(rows.len());
+        for mut playlist in rows {
+            let mut track_statement = connection.prepare(
+                "SELECT position, label, audio_size_bytes, audio_sha256
+                 FROM managed_tracks WHERE owner=?1 AND figure_id=?2 ORDER BY position",
+            )?;
+            playlist.tracks = track_statement
+                .query_map(params![owner, playlist.figure_id], |row| {
+                    Ok(ManagedTrackRecord {
+                        position: row.get(0)?,
+                        label: row.get(1)?,
+                        audio_size_bytes: row.get::<_, i64>(2)?.max(0) as u64,
+                        audio_sha256: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            playlists.push(playlist);
+        }
+        Ok(playlists)
+    }
+
+    pub fn save_managed_playlist(
+        &self,
+        owner: &str,
+        playlist: &ManagedPlaylistRecord,
+    ) -> Result<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO managed_playlists(owner, figure_id, name, updated_at, dirty, needs_audio_upload, deleted)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, 0)
+             ON CONFLICT(owner, figure_id) DO UPDATE SET
+               name=excluded.name, updated_at=excluded.updated_at, dirty=excluded.dirty,
+               needs_audio_upload=excluded.needs_audio_upload, deleted=0",
+            params![
+                owner,
+                playlist.figure_id,
+                playlist.name,
+                playlist.updated_at,
+                i64::from(playlist.dirty),
+                i64::from(playlist.needs_audio_upload),
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM managed_tracks WHERE owner=?1 AND figure_id=?2",
+            params![owner, playlist.figure_id],
+        )?;
+        for track in &playlist.tracks {
+            transaction.execute(
+                "INSERT INTO managed_tracks(owner, figure_id, position, label, audio_size_bytes, audio_sha256)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    owner,
+                    playlist.figure_id,
+                    track.position,
+                    track.label,
+                    track.audio_size_bytes as i64,
+                    track.audio_sha256,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn rename_managed_playlist(&self, owner: &str, figure_id: &str, name: &str) -> Result<()> {
+        let changed = self.connection()?.execute(
+            "UPDATE managed_playlists
+             SET name=?3, updated_at=?4, dirty=1
+             WHERE owner=?1 AND figure_id=?2 AND deleted=0",
+            params![owner, figure_id, name, Utc::now().to_rfc3339()],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("Cette playlist n'existe pas dans la bibliothèque locale.");
+        }
+        Ok(())
+    }
+
+    pub fn mark_managed_deleted(&self, owner: &str, figure_id: &str) -> Result<()> {
+        let changed = self.connection()?.execute(
+            "UPDATE managed_playlists
+             SET deleted=1, dirty=1, needs_audio_upload=0, updated_at=?3
+             WHERE owner=?1 AND figure_id=?2 AND deleted=0",
+            params![owner, figure_id, Utc::now().to_rfc3339()],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("Cette playlist n'existe pas dans la bibliothèque locale.");
+        }
+        Ok(())
+    }
+
+    pub fn mark_managed_clean(&self, owner: &str, figure_id: &str) -> Result<()> {
+        self.connection()?.execute(
+            "UPDATE managed_playlists SET dirty=0, needs_audio_upload=0
+             WHERE owner=?1 AND figure_id=?2",
+            params![owner, figure_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn purge_managed_playlist(&self, owner: &str, figure_id: &str) -> Result<()> {
+        self.connection()?.execute(
+            "DELETE FROM managed_playlists WHERE owner=?1 AND figure_id=?2",
+            params![owner, figure_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn managed_library_state(&self, owner: &str) -> Result<ManagedLibraryState> {
+        let connection = self.connection()?;
+        Ok(connection
+            .query_row(
+                "SELECT version, storage_limit_bytes FROM managed_library_state WHERE owner=?1",
+                params![owner],
+                |row| {
+                    Ok(ManagedLibraryState {
+                        version: row.get(0)?,
+                        storage_limit_bytes: row.get::<_, i64>(1)?.max(0) as u64,
+                    })
+                },
+            )
+            .unwrap_or(ManagedLibraryState {
+                version: 0,
+                storage_limit_bytes: 0,
+            }))
+    }
+
+    pub fn save_managed_library_state(
+        &self,
+        owner: &str,
+        version: i64,
+        storage_limit_bytes: u64,
+    ) -> Result<()> {
+        self.connection()?.execute(
+            "INSERT INTO managed_library_state(owner, version, storage_limit_bytes)
+             VALUES(?1, ?2, ?3)
+             ON CONFLICT(owner) DO UPDATE SET
+               version=excluded.version, storage_limit_bytes=excluded.storage_limit_bytes",
+            params![owner, version, storage_limit_bytes as i64],
+        )?;
         Ok(())
     }
 }
@@ -323,6 +629,44 @@ mod tests {
         assert_eq!(
             snapshot.figures[0].custom_name.as_deref(),
             Some("Mes histoires")
+        );
+    }
+
+    #[test]
+    fn adopts_offline_library_even_when_account_state_already_exists() {
+        let temp = tempdir().unwrap();
+        let db = LibraryDatabase::new(temp.path().join("library.sqlite3"));
+        db.initialize().unwrap();
+        db.save_managed_library_state("local", 4, 1_000).unwrap();
+        db.save_managed_library_state("edwin@example.be", 7, 2_000)
+            .unwrap();
+        db.save_managed_playlist(
+            "local",
+            &ManagedPlaylistRecord {
+                figure_id: "2000".into(),
+                name: "Histoire".into(),
+                updated_at: "2026-08-31T00:00:00Z".into(),
+                dirty: true,
+                needs_audio_upload: true,
+                deleted: false,
+                tracks: vec![ManagedTrackRecord {
+                    position: 0,
+                    label: "Piste".into(),
+                    audio_size_bytes: 12,
+                    audio_sha256: "abc".into(),
+                }],
+            },
+        )
+        .unwrap();
+
+        assert!(db.adopt_unassigned_library("EDWIN@example.be").unwrap());
+        assert_eq!(db.managed_playlist_count("local").unwrap(), 0);
+        assert_eq!(db.managed_playlist_count("edwin@example.be").unwrap(), 1);
+        assert_eq!(
+            db.managed_library_state("edwin@example.be")
+                .unwrap()
+                .version,
+            4
         );
     }
 }

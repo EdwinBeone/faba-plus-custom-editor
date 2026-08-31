@@ -19,11 +19,12 @@ Les excellentes recherches de [`wansors/myfaba-hacks`](https://github.com/wansor
 - détection automatique des cartes et supports amovibles ;
 - sélection manuelle d'un dossier en solution de secours ;
 - détection du dossier FABA+ `PLAYER`, puis scan non destructif des dossiers `Kxxxx` et du fichier `info` ;
-- bibliothèque locale SQLite liée aux cartes déjà rencontrées ;
-- noms de figurines et noms de pistes conservés localement ;
+- bibliothèque locale complète, utilisable sans carte SD et hors ligne ;
+- ajout, renommage, remplacement, suppression et écoute des playlists depuis le PC ;
+- import multiple par bouton ou glisser-déposer, avec création automatique des playlists et IDs ;
 - compte FABA Cloud partagé entre le PC et Android ;
 - synchronisation complète des playlists et de leurs MP3, avec contrôle d'intégrité SHA-256 ;
-- import d'une playlist cloud vers une carte SD en un clic ;
+- synchronisation de toute la bibliothèque vers une carte SD en un clic, sans supprimer les contenus supplémentaires déjà présents ;
 - application Android installable hors store : import de MP3, gestion de la bibliothèque et écriture NFC vérifiée ;
 - ajout ou remplacement de 1 à 99 fichiers MP3, dans l'ordre choisi ;
 - génération automatique de `00.faba`, `01.faba`, etc., avec titres ID3 FABA+ et fichier `info` ;
@@ -49,23 +50,23 @@ Les versions initiales ne sont pas signées. Windows SmartScreen ou macOS Gateke
 
 ## Utilisation
 
-1. Éteignez la FABA+ et retirez sa carte microSD.
-2. Insérez la carte dans l'ordinateur.
-3. Ouvrez FABA+ Custom Editor et sélectionnez la carte détectée.
-4. Cliquez sur **Ajouter une figurine**, choisissez un identifiant et vos MP3. L'application place la figurine dans `PLAYER/Kxxxx`.
-5. Réordonnez les pistes, acceptez l'avertissement, puis enregistrez.
+1. Ouvrez FABA+ Custom Editor et cliquez sur **Importer des MP3**. Une carte SD n'est pas nécessaire.
+2. Choisissez une playlist par fichier ou une playlist qui regroupe toute la sélection. Les IDs libres sont attribués automatiquement.
+3. Organisez la bibliothèque sur le PC : renommez, remplacez, supprimez ou écoutez les pistes. En cas de panne réseau, les changements restent dans le cache local.
+4. Éteignez la FABA+, retirez sa carte microSD puis insérez-la dans l'ordinateur.
+5. Ouvrez la carte détectée et cliquez sur **Synchroniser la carte**. Un même ID est sauvegardé puis remplacé ; les autres dossiers de la SD restent intacts.
 6. Éjectez proprement la carte avant de la remettre dans la FABA+.
 
 Pour associer un tag, choisissez un identifiant personnalisé entre `2000` et `8999`, ajoutez d'abord son contenu sur la carte, puis écrivez un enregistrement texte NDEF contenant `02190530XXXX00` sur un tag NFC vierge. Les plages `0xxx`, `1xxx` et `9xxx` sont réservées par FABA+. La compatibilité des tags et les risques spécifiques sont détaillés dans la [FAQ du projet d'origine](https://github.com/wansors/myfaba-hacks/blob/main/FAQ.md).
 
 ### FABA Cloud et Android
 
-1. Dans l'application PC, ouvrez **FABA Cloud**, créez un compte puis ouvrez une carte : les playlists et MP3 personnels sont envoyés dans votre bibliothèque privée.
+1. Dans l'application PC, ouvrez **FABA Cloud** et créez un compte : la bibliothèque locale et ses MP3 sont envoyés dans votre bibliothèque privée.
 2. Installez `FABA-Tag-Android.apk` depuis la page Releases et connectez le même compte.
 3. Sur Android, importez des MP3 ou choisissez une playlist existante, touchez **Écrire le tag NFC**, puis approchez un tag NDEF compatible.
-4. Une playlist créée sur Android apparaît sur le PC. Ouvrez une carte et cliquez sur **Importer sur la carte** : le PC télécharge les MP3, vérifie leur empreinte et produit les fichiers FABA+ corrects.
+4. Une playlist créée sur Android apparaît dans le cache du PC. Ouvrez une carte et cliquez sur **Synchroniser la carte** pour produire tous les fichiers FABA+ manquants ou mis à jour.
 
-La carte SD n'est jamais remplacée par le cloud : elle reste un support explicite. Une synchronisation fusionne les contenus et ne supprime pas une playlist cloud simplement parce qu'elle est absente de la carte ouverte.
+La carte SD reste une cible explicite : la synchronisation écrase uniquement les IDs présents dans la bibliothèque et ne supprime jamais les autres playlists de la carte.
 
 ## Sécurité des données
 
@@ -109,7 +110,7 @@ Consultez [ARCHITECTURE.md](docs/ARCHITECTURE.md) pour le modèle de données et
 
 ## État et feuille de route
 
-La version `0.2.x` cible FABA+, traite l'ancien FABA en lecture seule et ajoute la bibliothèque cloud complète avec l'application Android NFC. Les prochaines étapes envisagées sont la restauration guidée des sauvegardes et davantage de validation sur différents modèles de tags et téléphones.
+La version `0.3.x` cible FABA+, traite l'ancien FABA en lecture seule et fournit une bibliothèque locale/cloud complète avec synchronisation SD additive et application Android NFC. Les prochaines étapes envisagées sont la restauration guidée des sauvegardes et davantage de validation sur différents modèles de tags et téléphones.
 
 ## Crédits et licence
 

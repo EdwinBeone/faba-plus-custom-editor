@@ -85,6 +85,7 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .icon-button.quiet { width: 25px; height: 25px; border: 0; color: #aaa5b6; background: transparent; }
 
 .welcome-panel { position: relative; display: grid; grid-template-columns: minmax(400px, .95fr) minmax(400px, 1.05fr); align-items: center; min-height: calc(100vh - 142px); overflow: hidden; padding: 40px clamp(35px, 5vw, 78px); border: 1px solid #ece8f2; border-radius: 23px; background: linear-gradient(135deg, #fff 0%, #fff 48%, #faf7ff 100%); box-shadow: var(--shadow); }
+.cloud-library-panel + .welcome-panel { min-height: 390px; }
 .welcome-copy { position: relative; z-index: 2; max-width: 515px; }
 .welcome-badge { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; color: #775ec3; border: 1px solid #e1d9f8; border-radius: 999px; background: #f7f3ff; font-size: 10px; font-weight: 750; }
 .welcome-copy h2 { margin: 20px 0 16px; font-size: clamp(43px, 5vw, 67px); line-height: .97; letter-spacing: -.065em; }
@@ -203,6 +204,9 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .detail-actions .danger { grid-column: 1 / -1; }
 
 .busy-overlay { position: fixed; z-index: 20; inset: 0; display: grid; place-content: center; gap: 10px; color: #fff; background: rgba(39, 33, 57, .34); backdrop-filter: blur(3px); font-size: 12px; font-weight: 700; text-align: center; }
+.drop-overlay { position: fixed; z-index: 60; inset: 18px; display: grid; place-content: center; justify-items: center; gap: 8px; color: #fff; border: 3px dashed rgba(255,255,255,.8); border-radius: 22px; background: rgba(66, 50, 112, .88); backdrop-filter: blur(8px); pointer-events: none; }
+.drop-overlay strong { margin-top: 5px; font-size: 20px; }
+.drop-overlay span { color: #e5def8; font-size: 11px; }
 .toast { position: fixed; z-index: 50; right: 25px; bottom: 24px; display: grid; grid-template-columns: auto minmax(180px, 380px) auto; gap: 10px; align-items: center; padding: 12px 13px; color: #4f495b; border: 1px solid var(--line); border-radius: 12px; background: #fff; box-shadow: 0 18px 45px rgba(47, 38, 75, .2); font-size: 11px; }
 .toast.success > svg { color: var(--green); }
 .toast.error > svg { color: var(--danger); }
@@ -258,24 +262,53 @@ button:focus-visible, input:focus-visible, audio:focus-visible { outline: 3px so
 .modal-footer > span { display: flex; gap: 6px; align-items: center; color: #5a937b; font-size: 8px; font-weight: 650; }
 .modal-footer > div { display: flex; gap: 8px; }
 
-.cloud-library-panel { margin-top: 18px; padding: 20px; border: 1px solid #e5dff2; border-radius: 18px; background: #fff; box-shadow: var(--shadow); }
+.cloud-library-panel { margin: 0 0 18px; padding: 20px; border: 1px solid #e5dff2; border-radius: 18px; background: #fff; box-shadow: var(--shadow); }
 .cloud-library-heading, .cloud-library-heading > div { display: flex; align-items: center; justify-content: space-between; gap: 11px; }
 .cloud-library-heading > div > span { display: grid; width: 39px; height: 39px; place-items: center; color: var(--purple); border-radius: 12px; background: #eee9ff; }
 .cloud-library-heading p, .cloud-library-heading h2 { margin: 0; }
 .cloud-library-heading p { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .cloud-library-heading h2 { margin-top: 2px; font-size: 16px; }
-.cloud-playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 10px; margin-top: 17px; }
-.cloud-playlist-grid article { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 13px; background: #fcfbfd; }
-.cloud-playlist-grid .figure-art { grid-row: 1 / 3; width: 52px; height: 52px; }
+.library-heading-actions { flex-wrap: wrap; justify-content: flex-end !important; }
+.library-offline-note { display: flex; gap: 8px; align-items: center; margin-top: 13px; padding: 9px 11px; color: #856c37; border: 1px solid #eee0ba; border-radius: 10px; background: #fff9e9; font-size: 9px; }
+.cloud-playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 17px; }
+.cloud-playlist-grid article { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 11px; border: 1px solid var(--line); border-radius: 13px; background: #fcfbfd; }
+.cloud-playlist-grid .figure-art { width: 52px; height: 52px; }
 .cloud-playlist-grid article div { min-width: 0; }
 .cloud-playlist-grid article strong, .cloud-playlist-grid article small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cloud-playlist-grid article strong { font-size: 11px; }
 .cloud-playlist-grid article small { margin-top: 4px; color: var(--muted); font-size: 8px; }
 .cloud-playlist-grid article code { color: #6c5aa8; font-size: 8px; font-weight: 750; }
-.cloud-playlist-actions { display: flex; grid-column: 2; gap: 7px; align-items: center; justify-content: space-between; }
+.cloud-playlist-copy em { display: inline-block; margin-top: 5px; padding: 3px 6px; color: #927138; border-radius: 999px; background: #fff4d8; font-size: 7px; font-style: normal; font-weight: 800; }
+.cloud-playlist-tools { display: flex; gap: 4px; }
+.cloud-playlist-tools .icon-button { width: 29px; height: 29px; }
+.cloud-playlist-tools .danger-icon { color: var(--danger); }
+.managed-track-list { display: grid; grid-column: 1 / -1; max-height: 126px; gap: 4px; overflow: auto; }
+.managed-track-list > div { display: grid; grid-template-columns: 25px minmax(80px, 1fr) auto; gap: 7px; align-items: center; padding: 5px 7px; border-radius: 8px; background: #fff; }
+.managed-track-list > div > span { color: #888096; font-size: 7px; font-weight: 800; }
+.managed-track-list > div > strong { overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.managed-track-list audio { width: 92px; height: 25px; }
+.cloud-playlist-actions { display: flex; grid-column: 1 / -1; gap: 7px; align-items: center; justify-content: space-between; }
 .cloud-playlist-actions .button { min-height: 27px; padding: 5px 8px; font-size: 8px; white-space: nowrap; }
-.cloud-library-empty { display: flex; gap: 11px; align-items: center; margin-top: 16px; padding: 15px; color: #786c99; border-radius: 12px; background: #f8f5ff; }
+.cloud-library-empty { display: flex; width: 100%; gap: 11px; align-items: center; margin-top: 16px; padding: 15px; color: #786c99; border: 0; border-radius: 12px; background: #f8f5ff; cursor: pointer; text-align: left; }
 .cloud-library-empty p { margin: 0; font-size: 10px; line-height: 1.5; }
+
+.batch-modal { width: min(680px, 100%); }
+.batch-body { display: grid; gap: 17px; padding: 20px; }
+.batch-files { display: flex; max-height: 116px; flex-wrap: wrap; gap: 6px; overflow: auto; }
+.batch-files span { display: flex; max-width: 230px; gap: 6px; align-items: center; padding: 6px 8px; color: #665a75; border: 1px solid var(--line); border-radius: 8px; background: #faf9fc; }
+.batch-files strong { overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.batch-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0; padding: 0; border: 0; }
+.batch-modes legend { grid-column: 1 / -1; margin-bottom: 7px; font-size: 10px; font-weight: 800; }
+.batch-modes label { display: flex; gap: 9px; padding: 13px; border: 1px solid var(--line); border-radius: 11px; cursor: pointer; }
+.batch-modes label.selected { border-color: #cfc3ed; background: #faf8ff; box-shadow: 0 0 0 2px rgba(109,89,199,.06); }
+.batch-modes input { margin: 2px 0 0; accent-color: var(--purple); }
+.batch-modes strong, .batch-modes small { display: block; }
+.batch-modes strong { font-size: 10px; }
+.batch-modes small { margin-top: 4px; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.batch-name span { display: block; margin-bottom: 6px; font-size: 10px; font-weight: 750; }
+.batch-name input { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; outline: 0; background: #fbfafc; }
+.batch-name input:focus { border-color: #cfc4ea; box-shadow: 0 0 0 3px rgba(109,89,199,.08); }
+.batch-hint { display: flex; gap: 7px; align-items: center; margin: 0; padding: 10px; color: #4f8870; border-radius: 9px; background: #f3fbf7; font-size: 9px; }
 
 .cloud-modal { width: min(540px, 100%); }
 .cloud-icon { color: var(--purple); background: #eee9ff; }

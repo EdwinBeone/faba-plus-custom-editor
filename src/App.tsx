@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
@@ -106,8 +107,9 @@ type CloudTrack = {
   position: number;
   label: string;
   audioAvailable: boolean;
-  audioSizeBytes: number | null;
-  audioSha256: string | null;
+  audioSizeBytes: number;
+  audioSha256: string;
+  localPath: string | null;
 };
 
 type CloudPlaylist = {
@@ -117,6 +119,7 @@ type CloudPlaylist = {
   trackCount: number;
   tracks: CloudTrack[];
   updatedAt: string;
+  pendingSync: boolean;
 };
 
 type CloudLibrary = {
@@ -124,9 +127,48 @@ type CloudLibrary = {
   playlists: CloudPlaylist[];
   storageUsedBytes: number;
   storageLimitBytes: number;
+  offline: boolean;
+  pendingChanges: number;
+  lastError: string | null;
 };
 
+type BatchImport = { paths: string[] };
+
 type Toast = { tone: "success" | "error" | "info"; message: string };
+
+const browserPreviewLibrary: CloudLibrary = {
+  version: 8,
+  playlists: [
+    {
+      figureId: "2000",
+      name: "Histoires du soir",
+      nfcPayload: "02190530200000",
+      trackCount: 2,
+      updatedAt: "2026-08-31T12:00:00Z",
+      pendingSync: true,
+      tracks: [
+        { position: 0, label: "Le dragon", audioAvailable: false, audioSizeBytes: 0, audioSha256: "", localPath: null },
+        { position: 1, label: "La forêt", audioAvailable: false, audioSizeBytes: 0, audioSha256: "", localPath: null },
+      ],
+    },
+    {
+      figureId: "2001",
+      name: "Comptines",
+      nfcPayload: "02190530200100",
+      trackCount: 1,
+      updatedAt: "2026-08-31T12:00:00Z",
+      pendingSync: false,
+      tracks: [
+        { position: 0, label: "Une souris verte", audioAvailable: false, audioSizeBytes: 0, audioSha256: "", localPath: null },
+      ],
+    },
+  ],
+  storageUsedBytes: 42_000_000,
+  storageLimitBytes: 2_000_000_000,
+  offline: true,
+  pendingChanges: 1,
+  lastError: "Aperçu de l'état hors ligne",
+};
 
 const kindLabels: Record<CardKind, string> = {
   fabaPlus: "FABA+",
@@ -150,6 +192,8 @@ function App() {
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
   const [cloudLibrary, setCloudLibrary] = useState<CloudLibrary | null>(null);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [batchImport, setBatchImport] = useState<BatchImport | null>(null);
+  const [draggingFiles, setDraggingFiles] = useState(false);
 
   const refreshSources = async () => {
     setSourceBusy(true);
@@ -167,21 +211,22 @@ function App() {
     }
   };
 
-  const refreshCloud = async (rootPath?: string, notify = false): Promise<boolean> => {
+  const refreshCloud = async (notify = false): Promise<boolean> => {
     setCloudBusy(true);
     try {
       const status = await invoke<CloudStatus>("cloud_status");
       setCloudStatus(status);
-      if (!status.authenticated) {
-        setCloudLibrary(null);
-        return false;
-      }
-      const library = rootPath
-        ? await invoke<CloudLibrary>("cloud_sync", { rootPath })
-        : await invoke<CloudLibrary>("cloud_library");
+      const library = await invoke<CloudLibrary>(notify ? "cloud_sync" : "cloud_library");
       setCloudLibrary(library);
       setCloudStatus(await invoke<CloudStatus>("cloud_status"));
-      if (notify) showToast("success", "Bibliothèque synchronisée avec FABA Cloud.");
+      if (notify) {
+        showToast(
+          library.offline ? "info" : "success",
+          library.offline
+            ? `Mode hors ligne : ${library.pendingChanges} modification(s) conservée(s) sur ce PC.`
+            : "Bibliothèque locale et FABA Cloud synchronisés.",
+        );
+      }
       return true;
     } catch (error) {
       if (notify) showToast("error", stringifyError(error));
@@ -196,7 +241,40 @@ function App() {
       void refreshSources();
       void refreshCloud();
     }
-    else setSourceBusy(false);
+    else {
+      setSourceBusy(false);
+      if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("preview-library")) {
+        setCloudLibrary(browserPreviewLibrary);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === "enter" || event.payload.type === "over") {
+        setDraggingFiles(true);
+      } else if (event.payload.type === "leave") {
+        setDraggingFiles(false);
+      } else if (event.payload.type === "drop") {
+        setDraggingFiles(false);
+        const paths = event.payload.paths.filter(isMp3Path);
+        if (paths.length === 0) {
+          showToast("error", "Déposez uniquement des fichiers MP3.");
+        } else {
+          setBatchImport({ paths });
+        }
+      }
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -217,7 +295,7 @@ function App() {
       setSelectedFigureId(result.figures[0]?.id ?? null);
       setQuery("");
       await refreshSources();
-      await refreshCloud(result.rootPath);
+      await refreshCloud();
     } catch (error) {
       showToast("error", stringifyError(error));
     } finally {
@@ -263,7 +341,6 @@ function App() {
     );
     showToast("success", result.message);
     void refreshSources();
-    void refreshCloud(result.snapshot.rootPath);
   };
 
   const deleteSelected = async () => {
@@ -325,7 +402,6 @@ function App() {
       });
       setSnapshot(result);
       showToast("success", "Nom local enregistré.");
-      void refreshCloud(result.rootPath);
     } catch (error) {
       showToast("error", stringifyError(error));
     }
@@ -343,14 +419,14 @@ function App() {
       return;
     }
     if (playlist.tracks.some((track) => !track.audioAvailable)) {
-      showToast("error", "Cette playlist cloud n'a pas encore tous ses fichiers audio.");
+      showToast("error", "Cette playlist n'a pas encore tous ses fichiers audio dans le cache local.");
       return;
     }
     const alreadyExists = snapshot.figures.some((figure) => figure.id === playlist.figureId);
     if (alreadyExists) {
       const accepted = await ask(
-        `K${playlist.figureId} existe déjà sur cette carte. La remplacer par la version cloud ?\n\nUne sauvegarde locale sera créée avant le remplacement.`,
-        { title: "Importer depuis FABA Cloud", kind: "warning" },
+        `K${playlist.figureId} existe déjà sur cette carte. La remplacer par la version de la bibliothèque ?\n\nUne sauvegarde locale sera créée avant le remplacement.`,
+        { title: "Écrire la playlist", kind: "warning" },
       );
       if (!accepted) return;
     }
@@ -361,6 +437,119 @@ function App() {
         figureId: playlist.figureId,
       });
       handleMutation(result);
+    } catch (error) {
+      showToast("error", stringifyError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickBatchAudio = async () => {
+    if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window) && new URLSearchParams(window.location.search).has("preview-library")) {
+      setBatchImport({ paths: ["/Musique/Le dragon.mp3", "/Musique/La forêt.mp3"] });
+      return;
+    }
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "Fichiers MP3", extensions: ["mp3"] }],
+      title: "Importer des sons dans la bibliothèque",
+    });
+    const paths = typeof selected === "string" ? [selected] : selected;
+    if (paths?.length) setBatchImport({ paths });
+  };
+
+  const applyLibrary = (library: CloudLibrary, message: string) => {
+    setCloudLibrary(library);
+    showToast(
+      library.offline ? "info" : "success",
+      library.offline && library.pendingChanges > 0
+        ? `${message} Synchronisation cloud en attente.`
+        : message,
+    );
+    void invoke<CloudStatus>("cloud_status").then(setCloudStatus);
+  };
+
+  const renameLibraryPlaylist = async (playlist: CloudPlaylist) => {
+    const name = window.prompt("Nouveau nom de la playlist :", playlist.name);
+    if (name === null || !name.trim()) return;
+    setCloudBusy(true);
+    try {
+      applyLibrary(
+        await invoke<CloudLibrary>("library_rename_playlist", {
+          figureId: playlist.figureId,
+          name,
+        }),
+        "Playlist renommée.",
+      );
+    } catch (error) {
+      showToast("error", stringifyError(error));
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const replaceLibraryPlaylist = async (playlist: CloudPlaylist) => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "Fichiers MP3", extensions: ["mp3"] }],
+      title: `Remplacer les sons de ${playlist.name}`,
+    });
+    const audioPaths = typeof selected === "string" ? [selected] : selected;
+    if (!audioPaths?.length) return;
+    setCloudBusy(true);
+    try {
+      applyLibrary(
+        await invoke<CloudLibrary>("library_replace_playlist", {
+          figureId: playlist.figureId,
+          audioPaths,
+        }),
+        "Sons remplacés dans la bibliothèque.",
+      );
+    } catch (error) {
+      showToast("error", stringifyError(error));
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const deleteLibraryPlaylist = async (playlist: CloudPlaylist) => {
+    const accepted = await ask(
+      `Supprimer « ${playlist.name} » de votre bibliothèque locale et du cloud ?\n\nLa carte SD ne sera pas modifiée.`,
+      { title: "Supprimer la playlist", kind: "warning" },
+    );
+    if (!accepted) return;
+    setCloudBusy(true);
+    try {
+      applyLibrary(
+        await invoke<CloudLibrary>("library_delete_playlist", {
+          figureId: playlist.figureId,
+        }),
+        "Playlist supprimée de la bibliothèque.",
+      );
+    } catch (error) {
+      showToast("error", stringifyError(error));
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const syncLibraryToCard = async () => {
+    if (!snapshot || !editable) {
+      showToast("error", "Ouvrez d'abord une carte FABA+ accessible en écriture.");
+      return;
+    }
+    const accepted = await ask(
+      `Synchroniser toute la bibliothèque sur ${lastPathPart(snapshot.rootPath)} ?\n\nLes IDs identiques seront remplacés avec sauvegarde. Les autres contenus déjà présents sur la carte seront conservés.`,
+      { title: "Synchroniser la carte", kind: "info" },
+    );
+    if (!accepted) return;
+    setBusy(true);
+    try {
+      handleMutation(
+        await invoke<MutationResult>("sync_library_to_card", {
+          rootPath: snapshot.rootPath,
+        }),
+      );
     } catch (error) {
       showToast("error", stringifyError(error));
     } finally {
@@ -486,26 +675,33 @@ function App() {
             <button
               className="button primary"
               type="button"
-              onClick={() => setEditorFigure("new")}
-              disabled={!editable || busy}
-              title={!editable ? "Ouvrez une carte FABA+ accessible en écriture" : undefined}
+              onClick={pickBatchAudio}
+              disabled={busy || cloudBusy}
             >
-              <Plus size={17} /> Ajouter une figurine
+              <Plus size={17} /> Importer des MP3
             </button>
           </div>
         </header>
 
         {!snapshot ? (
           <>
+            {cloudLibrary && (
+              <CloudLibraryPanel
+                library={cloudLibrary}
+                onSync={() => refreshCloud(true)}
+                onAdd={pickBatchAudio}
+                onRename={renameLibraryPlaylist}
+                onReplace={replaceLibraryPlaylist}
+                onDelete={deleteLibraryPlaylist}
+                busy={cloudBusy || busy}
+              />
+            )}
             <WelcomePanel
               devices={devices}
               busy={busy}
               onOpenCard={openCard}
               onPickFolder={pickCardFolder}
             />
-            {cloudStatus?.authenticated && cloudLibrary && (
-              <CloudLibraryPanel library={cloudLibrary} onSync={() => refreshCloud(undefined, true)} busy={cloudBusy} />
-            )}
           </>
         ) : (
           <>
@@ -522,7 +718,7 @@ function App() {
               </div>
               <div className="summary-stat"><strong>{snapshot.figures.length}</strong><span>figurines</span></div>
               <div className="summary-stat"><strong>{totalTracks(snapshot)}</strong><span>pistes</span></div>
-              <button className={`summary-stat cloud-summary ${cloudStatus?.authenticated ? "synced" : ""}`} type="button" onClick={() => cloudStatus?.authenticated ? void refreshCloud(snapshot.rootPath, true) : setCloudOpen(true)}>
+              <button className={`summary-stat cloud-summary ${cloudStatus?.authenticated ? "synced" : ""}`} type="button" onClick={() => cloudStatus?.authenticated ? void refreshCloud(true) : setCloudOpen(true)}>
                 {cloudBusy ? <LoaderCircle className="spin" size={18} /> : cloudStatus?.authenticated ? <Cloud size={18} /> : <CloudOff size={18} />}
                 <span>{cloudStatus?.authenticated ? "Cloud synchronisé" : "Cloud désactivé"}</span>
               </button>
@@ -535,11 +731,16 @@ function App() {
               </div>
             ))}
 
-            {cloudStatus?.authenticated && cloudLibrary && (
+            {cloudLibrary && (
               <CloudLibraryPanel
                 library={cloudLibrary}
-                onSync={() => refreshCloud(snapshot.rootPath, true)}
+                onSync={() => refreshCloud(true)}
+                onAdd={pickBatchAudio}
+                onRename={renameLibraryPlaylist}
+                onReplace={replaceLibraryPlaylist}
+                onDelete={deleteLibraryPlaylist}
                 onImport={importCloudPlaylist}
+                onSyncCard={syncLibraryToCard}
                 cardWritable={Boolean(editable)}
                 busy={cloudBusy || busy}
               />
@@ -659,6 +860,7 @@ function App() {
       </main>
 
       {busy && <div className="busy-overlay" aria-live="polite"><LoaderCircle className="spin" size={34} /><span>Opération en cours…</span></div>}
+      {draggingFiles && <div className="drop-overlay" aria-live="polite"><Upload size={40} /><strong>Déposez vos MP3</strong><span>Ils seront ajoutés à la bibliothèque locale.</span></div>}
       {toast && (
         <div className={`toast ${toast.tone}`} role="status">
           {toast.tone === "success" ? <Check size={18} /> : toast.tone === "error" ? <AlertTriangle size={18} /> : <CircleHelp size={18} />}
@@ -681,6 +883,18 @@ function App() {
         />
       )}
 
+      {batchImport && (
+        <BatchImportModal
+          paths={batchImport.paths}
+          onClose={() => setBatchImport(null)}
+          onImported={(library) => {
+            setBatchImport(null);
+            applyLibrary(library, "Import terminé.");
+          }}
+          onNotify={showToast}
+        />
+      )}
+
       {diagnosticsOpen && (
         <DiagnosticsModal
           onClose={() => setDiagnosticsOpen(false)}
@@ -694,7 +908,7 @@ function App() {
           onClose={() => setCloudOpen(false)}
           onStatus={setCloudStatus}
           onRefresh={async () => {
-            return refreshCloud(snapshot?.rootPath, true);
+            return refreshCloud(true);
           }}
           onLibrary={setCloudLibrary}
           onNotify={showToast}
@@ -760,7 +974,7 @@ function CloudAccountModal({
     try {
       const next = await invoke<CloudStatus>("cloud_logout");
       onStatus(next);
-      onLibrary(null);
+      onLibrary(await invoke<CloudLibrary>("cloud_library"));
       onNotify("success", "Compte déconnecté de cet ordinateur.");
     } catch (error) {
       onNotify("error", stringifyError(error));
@@ -808,16 +1022,103 @@ function CloudAccountModal({
   );
 }
 
+function BatchImportModal({
+  paths,
+  onClose,
+  onImported,
+  onNotify,
+}: {
+  paths: string[];
+  onClose: () => void;
+  onImported: (library: CloudLibrary) => void;
+  onNotify: (tone: Toast["tone"], message: string) => void;
+}) {
+  const [mode, setMode] = useState<"onePerFile" | "singlePlaylist">(
+    paths.length === 1 ? "singlePlaylist" : "onePerFile",
+  );
+  const [playlistName, setPlaylistName] = useState(
+    paths.length === 1 ? fileNameWithoutExtension(paths[0]) : "",
+  );
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (mode === "singlePlaylist" && !playlistName.trim()) {
+      onNotify("error", "Donnez un nom à la playlist.");
+      return;
+    }
+    setLoading(true);
+    try {
+      onImported(
+        await invoke<CloudLibrary>("library_import_batch", {
+          audioPaths: paths,
+          mode,
+          playlistName: mode === "singlePlaylist" ? playlistName : null,
+        }),
+      );
+    } catch (error) {
+      onNotify("error", stringifyError(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !loading && onClose()}>
+      <form className="modal batch-modal" role="dialog" aria-modal="true" aria-labelledby="batch-title" onSubmit={submit}>
+        <div className="modal-header">
+          <div><span className="modal-icon"><Upload size={20} /></span><div><p>Import en lot</p><h2 id="batch-title">Ajouter {paths.length} fichier{paths.length > 1 ? "s" : ""} MP3</h2></div></div>
+          <button className="icon-button" type="button" onClick={onClose} disabled={loading} aria-label="Fermer"><X size={19} /></button>
+        </div>
+        <div className="batch-body">
+          <div className="batch-files">
+            {paths.map((path) => <span key={path}><Music2 size={14} /><strong>{lastPathPart(path)}</strong></span>)}
+          </div>
+          <fieldset className="batch-modes">
+            <legend>Comment créer les playlists ?</legend>
+            <label className={mode === "onePerFile" ? "selected" : ""}>
+              <input type="radio" name="batch-mode" checked={mode === "onePerFile"} onChange={() => setMode("onePerFile")} />
+              <span><strong>Une playlist par fichier</strong><small>Chaque playlist reprend le nom du MP3. Les IDs sont générés automatiquement.</small></span>
+            </label>
+            <label className={mode === "singlePlaylist" ? "selected" : ""}>
+              <input type="radio" name="batch-mode" checked={mode === "singlePlaylist"} onChange={() => setMode("singlePlaylist")} />
+              <span><strong>Une playlist avec tous les sons</strong><small>Les pistes suivent l’ordre de la sélection.</small></span>
+            </label>
+          </fieldset>
+          {mode === "singlePlaylist" && (
+            <label className="batch-name"><span>Nom de la playlist</span><input value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} maxLength={100} autoFocus placeholder="Ex. Histoires du soir" required /></label>
+          )}
+          <p className="batch-hint"><Database size={15} /> Import local immédiat. Si le cloud est indisponible, tout reste sur ce PC et sera envoyé plus tard.</p>
+        </div>
+        <div className="modal-footer">
+          <span><Sparkles size={16} /> IDs personnalisés libres entre 2000 et 8999</span>
+          <div><button className="button secondary" type="button" onClick={onClose} disabled={loading}>Annuler</button><button className="button primary" type="submit" disabled={loading}>{loading ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />} Importer</button></div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function CloudLibraryPanel({
   library,
   onSync,
+  onAdd,
+  onRename,
+  onReplace,
+  onDelete,
   onImport,
+  onSyncCard,
   cardWritable,
   busy,
 }: {
   library: CloudLibrary;
   onSync: () => Promise<unknown>;
+  onAdd: () => Promise<void>;
+  onRename: (playlist: CloudPlaylist) => Promise<void>;
+  onReplace: (playlist: CloudPlaylist) => Promise<void>;
+  onDelete: (playlist: CloudPlaylist) => Promise<void>;
   onImport?: (playlist: CloudPlaylist) => Promise<void>;
+  onSyncCard?: () => Promise<void>;
   cardWritable?: boolean;
   busy: boolean;
 }) {
@@ -825,18 +1126,35 @@ function CloudLibraryPanel({
   return (
     <section className="cloud-library-panel">
       <div className="cloud-library-heading">
-        <div><span><Cloud size={18} /></span><div><p>{completeCount}/{library.playlists.length} prêtes · {formatBytes(library.storageUsedBytes)}</p><h2>Ma bibliothèque cloud</h2></div></div>
-        <button className="button secondary" type="button" onClick={onSync} disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} Actualiser</button>
+        <div><span>{library.offline ? <CloudOff size={18} /> : <Cloud size={18} />}</span><div><p>{completeCount}/{library.playlists.length} prêtes · {formatBytes(library.storageUsedBytes)} · {library.offline ? "cache local" : "cloud à jour"}</p><h2>Ma bibliothèque</h2></div></div>
+        <div className="library-heading-actions">
+          <button className="button secondary" type="button" onClick={onSync} disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} Actualiser</button>
+          <button className="button secondary" type="button" onClick={onAdd} disabled={busy}><Plus size={15} /> Ajouter</button>
+          {onSyncCard && <button className="button primary" type="button" onClick={onSyncCard} disabled={busy || !cardWritable || library.playlists.length === 0}><HardDrive size={15} /> Synchroniser la carte</button>}
+        </div>
       </div>
+      {(library.offline || library.pendingChanges > 0) && (
+        <div className="library-offline-note"><CloudOff size={16} /><span><strong>{library.offline ? "Mode hors ligne" : "Synchronisation en attente"}</strong>{library.pendingChanges > 0 ? ` · ${library.pendingChanges} modification(s) conservée(s) localement.` : " · Bibliothèque disponible depuis le cache de ce PC."}</span></div>
+      )}
       {library.playlists.length === 0 ? (
-        <div className="cloud-library-empty"><Smartphone size={26} /><p>Ouvrez une carte FABA+ pour envoyer automatiquement ses playlists dans votre compte.</p></div>
+        <button className="cloud-library-empty" type="button" onClick={onAdd}><Upload size={26} /><p><strong>Votre bibliothèque est vide.</strong><br />Importez des MP3 maintenant, sans connecter de carte SD.</p></button>
       ) : (
         <div className="cloud-playlist-grid">
           {library.playlists.map((playlist) => (
             <article key={playlist.figureId}>
               <span className={`figure-art art-${Number(playlist.figureId) % 6}`}><Music2 size={24} /><small>K{playlist.figureId}</small></span>
-              <div><strong>{playlist.name}</strong><small>{playlist.trackCount} piste{playlist.trackCount > 1 ? "s" : ""} · {playlist.tracks.every((track) => track.audioAvailable) ? "audio complet" : "audio incomplet"}</small></div>
-              <div className="cloud-playlist-actions"><code>{playlist.nfcPayload}</code>{onImport && <button className="button secondary" type="button" onClick={() => void onImport(playlist)} disabled={busy || !cardWritable || playlist.tracks.some((track) => !track.audioAvailable)}><Download size={13} /> Importer sur la carte</button>}</div>
+              <div className="cloud-playlist-copy"><strong>{playlist.name}</strong><small>{playlist.trackCount} piste{playlist.trackCount > 1 ? "s" : ""} · {playlist.tracks.every((track) => track.audioAvailable) ? "audio local complet" : "audio incomplet"}</small>{playlist.pendingSync && <em>En attente de cloud</em>}</div>
+              <div className="cloud-playlist-tools">
+                <button className="icon-button" type="button" onClick={() => void onRename(playlist)} disabled={busy} title="Renommer"><Pencil size={14} /></button>
+                <button className="icon-button" type="button" onClick={() => void onReplace(playlist)} disabled={busy} title="Remplacer les sons"><RotateCcw size={14} /></button>
+                <button className="icon-button danger-icon" type="button" onClick={() => void onDelete(playlist)} disabled={busy} title="Supprimer"><Trash2 size={14} /></button>
+              </div>
+              <div className="managed-track-list">
+                {playlist.tracks.map((track) => (
+                  <div key={track.position}><span>{String(track.position + 1).padStart(2, "0")}</span><strong>{track.label}</strong>{track.localPath ? <audio controls preload="none" src={convertFileSrc(track.localPath)} aria-label={`Écouter ${track.label}`} /> : <small>Absent du cache</small>}</div>
+                ))}
+              </div>
+              <div className="cloud-playlist-actions"><code>{playlist.nfcPayload}</code>{onImport && <button className="button secondary" type="button" onClick={() => void onImport(playlist)} disabled={busy || !cardWritable || playlist.tracks.some((track) => !track.audioAvailable)}><Download size={13} /> Écrire uniquement celle-ci</button>}</div>
             </article>
           ))}
         </div>
@@ -944,7 +1262,7 @@ function WelcomePanel({
       <div className="welcome-copy">
         <span className="welcome-badge"><Sparkles size={14} /> Simple, local et synchronisé</span>
         <h2>Vos histoires.<br /><em>Votre FABA+.</em></h2>
-        <p>Insérez la carte microSD de votre FABA+, puis organisez vos propres sons sans scripts, Docker ou ligne de commande.</p>
+        <p>Commencez par importer et organiser vos sons sur ce PC. Insérez la carte microSD uniquement quand vous êtes prêt à la synchroniser.</p>
         <div className="welcome-actions">
           {likelyCard && (
             <button className="button primary large" type="button" onClick={() => onOpenCard(likelyCard.mountPath)} disabled={busy}>
@@ -1142,6 +1460,14 @@ function lastPathPart(path: string) {
 function fileName(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || path;
+}
+
+function fileNameWithoutExtension(path: string) {
+  return fileName(path).replace(/\.[^.]+$/, "");
+}
+
+function isMp3Path(path: string) {
+  return /\.mp3$/i.test(path);
 }
 
 function normalizeFigureId(value: string) {

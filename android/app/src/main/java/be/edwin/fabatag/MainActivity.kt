@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -59,7 +60,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
     private val api = ApiClient()
@@ -75,7 +75,9 @@ class MainActivity : ComponentActivity() {
     private var nfcResult by mutableStateOf<String?>(null)
     private var pickerTarget: CloudPlaylist? = null
     private var nfcAdapter: NfcAdapter? = null
-    private val nfcWriting = AtomicBoolean(false)
+    // A session is armed explicitly by the user and may consume exactly one tag.
+    // Keeping the gate closed after the callback also blocks queued reader events.
+    private val nfcWriteGate = NfcWriteGate()
 
     private val audioPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@registerForActivityResult
@@ -139,7 +141,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (pendingNfc != null) enableNfcReader()
+        if (pendingNfc != null && nfcWriteGate.isArmed()) enableNfcReader()
     }
 
     override fun onPause() {
@@ -282,6 +284,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         pendingNfc = playlist
+        nfcWriteGate.arm()
         statusMessage = null
         enableNfcReader()
     }
@@ -298,13 +301,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleTag(tag: Tag) {
+        if (!nfcWriteGate.tryConsume()) return
         val playlist = pendingNfc ?: return
-        if (!nfcWriting.compareAndSet(false, true)) return
+        // Stop reader mode before doing I/O so Android cannot queue the same tag again.
+        nfcAdapter?.disableReaderMode(this)
         val result = writeNdef(tag, playlist.nfcPayload)
         runOnUiThread {
-            nfcAdapter?.disableReaderMode(this)
             pendingNfc = null
-            nfcWriting.set(false)
             nfcResult = if (result.success) {
                 "Tag prêt pour « ${playlist.name} » (K${playlist.figureId})."
             } else {
@@ -314,6 +317,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun cancelNfc() {
+        nfcWriteGate.cancel()
         pendingNfc = null
         nfcAdapter?.disableReaderMode(this)
     }
@@ -406,10 +410,12 @@ private fun FabaApp(
     onDismissStatus: () -> Unit,
 ) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        if (session == null) {
-            AuthScreen(loading, statusMessage, onAuthenticate, onDismissStatus)
-        } else {
-            LibraryScreen(session, library, loading, statusMessage, onRefresh, onLogout, onImport, onRename, onDelete, onArmNfc, onDismissStatus)
+        Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+            if (session == null) {
+                AuthScreen(loading, statusMessage, onAuthenticate, onDismissStatus)
+            } else {
+                LibraryScreen(session, library, loading, statusMessage, onRefresh, onLogout, onImport, onRename, onDelete, onArmNfc, onDismissStatus)
+            }
         }
     }
     importDraft?.let { draft ->

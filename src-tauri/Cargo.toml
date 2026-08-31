@@ -1,6 +1,6 @@
 [package]
 name = "faba-plus-custom-editor"
-version = "0.2.0"
+version = "0.3.0"
 description = "A friendly cross-platform desktop editor for FABA+ microSD cards"
 authors = ["EdwinBeone"]
 edition = "2021"

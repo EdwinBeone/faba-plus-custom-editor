@@ -1,17 +1,8 @@
-use crate::{
-    domain::{CardSnapshot, Figure},
-    storage::{CloudSession, CloudStatus, LibraryDatabase},
-};
+use crate::storage::{CloudSession, CloudStatus, LibraryDatabase};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    io::{BufReader, Read},
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fs, path::Path, time::Duration};
 
 const PRODUCTION_ENDPOINT: &str = "https://faba.bo1.be";
 
@@ -144,106 +135,90 @@ pub async fn library(database: &LibraryDatabase) -> Result<CloudLibrary> {
     decode(response).await
 }
 
-pub async fn sync_snapshot(
+pub async fn save_remote_playlist(
     database: &LibraryDatabase,
-    snapshot: &CardSnapshot,
+    figure_id: &str,
+    name: &str,
+    labels: &[String],
+    reset_audio: bool,
 ) -> Result<CloudLibrary> {
+    if !is_custom_figure_id(figure_id) {
+        bail!("L'identifiant doit être compris entre 2000 et 8999.");
+    }
+    if labels.is_empty() || labels.len() > 99 {
+        bail!("Une playlist doit contenir entre 1 et 99 pistes.");
+    }
     let session = require_session(database)?;
-    let playlists = snapshot
-        .figures
+    let tracks = labels
         .iter()
-        .filter(|figure| is_custom_figure_id(&figure.id) && !figure.tracks.is_empty())
-        .map(playlist_from_figure)
+        .enumerate()
+        .map(|(position, label)| {
+            serde_json::json!({
+                "position": position,
+                "label": label,
+            })
+        })
         .collect::<Vec<_>>();
     let response = client()?
-        .post(format!("{}/api/v1/library/sync", session.endpoint))
+        .put(format!(
+            "{}/api/v1/library/playlists/{figure_id}",
+            session.endpoint
+        ))
         .bearer_auth(&session.token)
         .json(&serde_json::json!({
-            "playlists": playlists,
-            "replaceMissing": false,
+            "figureId": figure_id,
+            "name": name,
+            "tracks": tracks,
+            "resetAudio": reset_audio,
         }))
         .send()
         .await
-        .context("Impossible de synchroniser avec FABA Cloud.")?;
-    let initial_library: CloudLibrary = decode(response).await?;
-    for figure in snapshot
-        .figures
-        .iter()
-        .filter(|figure| is_custom_figure_id(&figure.id) && !figure.tracks.is_empty())
-    {
-        let remote = initial_library
-            .playlists
-            .iter()
-            .find(|playlist| playlist.figure_id == figure.id);
-        for (position, track) in figure.tracks.iter().enumerate() {
-            let hash = sha256_file(Path::new(&track.path))?;
-            let already_uploaded = remote
-                .and_then(|playlist| playlist.tracks.get(position))
-                .and_then(|track| track.audio_sha256.as_deref())
-                == Some(hash.as_str());
-            if !already_uploaded {
-                upload_track(
-                    &session,
-                    &figure.id,
-                    position as u16,
-                    Path::new(&track.path),
-                )
-                .await?;
-            }
-        }
-    }
-    let library = library(database).await?;
-    database.mark_cloud_synced()?;
-    Ok(library)
+        .context("Impossible d'enregistrer la playlist dans FABA Cloud.")?;
+    decode(response).await
 }
 
-pub async fn download_playlist(
-    database: &LibraryDatabase,
-    figure_id: &str,
-    destination: &Path,
-) -> Result<(CloudPlaylist, Vec<PathBuf>)> {
+pub async fn delete_remote_playlist(database: &LibraryDatabase, figure_id: &str) -> Result<()> {
     if !is_custom_figure_id(figure_id) {
-        bail!("L'identifiant cloud n'est pas un identifiant FABA+ personnalisé valide.");
+        bail!("L'identifiant doit être compris entre 2000 et 8999.");
     }
     let session = require_session(database)?;
-    let playlist = library(database)
-        .await?
-        .playlists
-        .into_iter()
-        .find(|playlist| playlist.figure_id == figure_id)
-        .ok_or_else(|| anyhow!("Cette playlist n'existe plus dans FABA Cloud."))?;
-    if playlist.tracks.is_empty() || playlist.tracks.iter().any(|track| !track.audio_available) {
-        bail!("Cette playlist cloud n'a pas encore tous ses fichiers audio.");
+    let response = client()?
+        .delete(format!(
+            "{}/api/v1/library/playlists/{figure_id}",
+            session.endpoint
+        ))
+        .bearer_auth(&session.token)
+        .send()
+        .await
+        .context("Impossible de supprimer la playlist de FABA Cloud.")?;
+    let _: CloudLibrary = decode(response).await?;
+    Ok(())
+}
+
+pub async fn download_track_bytes(
+    database: &LibraryDatabase,
+    figure_id: &str,
+    position: u16,
+) -> Result<Vec<u8>> {
+    let session = require_session(database)?;
+    let response = client()?
+        .get(format!(
+            "{}/api/v1/library/playlists/{figure_id}/tracks/{position}/audio",
+            session.endpoint
+        ))
+        .bearer_auth(&session.token)
+        .send()
+        .await
+        .context("Impossible de télécharger une piste depuis FABA Cloud.")?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .context("Piste cloud illisible pendant le téléchargement.")?;
+    if !status.is_success() {
+        return Err(error_from_bytes(status, &bytes));
     }
-    fs::create_dir_all(destination).context("Impossible de préparer le téléchargement cloud.")?;
-    let mut paths = Vec::with_capacity(playlist.tracks.len());
-    for track in &playlist.tracks {
-        let response = client()?
-            .get(format!(
-                "{}/api/v1/library/playlists/{}/tracks/{}/audio",
-                session.endpoint, playlist.figure_id, track.position
-            ))
-            .bearer_auth(&session.token)
-            .send()
-            .await
-            .context("Impossible de télécharger une piste depuis FABA Cloud.")?;
-        let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .context("Piste cloud illisible pendant le téléchargement.")?;
-        if !status.is_success() {
-            return Err(error_from_bytes(status, &bytes));
-        }
-        let hash = hex::encode(Sha256::digest(&bytes));
-        if track.audio_sha256.as_deref() != Some(hash.as_str()) {
-            bail!("La vérification d'intégrité d'une piste cloud a échoué.");
-        }
-        let path = destination.join(format!("{:02}.mp3", track.position));
-        fs::write(&path, &bytes).context("Impossible d'enregistrer une piste cloud localement.")?;
-        paths.push(path);
-    }
-    Ok((playlist, paths))
+    Ok(bytes.to_vec())
 }
 
 async fn authenticate(
@@ -294,32 +269,6 @@ fn require_session(database: &LibraryDatabase) -> Result<CloudSession> {
         .ok_or_else(|| anyhow!("Connectez-vous d'abord à FABA Cloud."))
 }
 
-fn playlist_from_figure(figure: &Figure) -> CloudPlaylist {
-    CloudPlaylist {
-        figure_id: figure.id.clone(),
-        name: figure
-            .custom_name
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| format!("Figurine K{}", figure.id)),
-        nfc_payload: String::new(),
-        track_count: figure.tracks.len() as u16,
-        tracks: figure
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(position, track)| CloudTrack {
-                position: position as u16,
-                label: track.label.clone(),
-                audio_available: false,
-                audio_size_bytes: None,
-                audio_sha256: None,
-            })
-            .collect(),
-        updated_at: String::new(),
-    }
-}
-
 fn is_custom_figure_id(value: &str) -> bool {
     value.len() == 4
         && value.bytes().all(|byte| byte.is_ascii_digit())
@@ -335,7 +284,7 @@ fn client() -> Result<Client> {
         .map_err(Into::into)
 }
 
-async fn upload_track(
+pub async fn upload_track(
     session: &CloudSession,
     figure_id: &str,
     position: u16,
@@ -356,22 +305,6 @@ async fn upload_track(
         .context("Impossible d'envoyer une piste vers FABA Cloud.")?;
     let _: serde_json::Value = decode(response).await?;
     Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("Impossible de lire la piste {}.", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut hash = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
-    Ok(hex::encode(hash.finalize()))
 }
 
 fn error_from_bytes(status: StatusCode, bytes: &[u8]) -> anyhow::Error {

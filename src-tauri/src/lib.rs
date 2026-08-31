@@ -2,6 +2,7 @@ mod cloud;
 mod commands;
 mod diagnostics;
 mod domain;
+mod managed;
 mod storage;
 
 use commands::AppState;
@@ -19,6 +20,8 @@ pub fn run() {
             std::fs::create_dir_all(&app_data)?;
             let database = LibraryDatabase::new(app_data.join("library.sqlite3"));
             database.initialize()?;
+            let library_root = app_data.join("managed-library");
+            std::fs::create_dir_all(&library_root)?;
             let diagnostics = DiagnosticLogger::new(app_data.join("diagnostics.log"));
             diagnostics.info(
                 "app.start",
@@ -32,6 +35,7 @@ pub fn run() {
             app.manage(AppState {
                 database,
                 diagnostics,
+                library_root,
             });
             Ok(())
         })
@@ -51,7 +55,12 @@ pub fn run() {
             commands::cloud_logout,
             commands::cloud_library,
             commands::cloud_sync,
-            commands::cloud_import_playlist
+            commands::cloud_import_playlist,
+            commands::library_import_batch,
+            commands::library_replace_playlist,
+            commands::library_rename_playlist,
+            commands::library_delete_playlist,
+            commands::sync_library_to_card
         ])
         .run(tauri::generate_context!())
         .expect("error while running FABA+ Custom Editor");
