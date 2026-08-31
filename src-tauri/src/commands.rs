@@ -1,6 +1,8 @@
+use crate::diagnostics::{DiagnosticLogger, DiagnosticReport};
 use crate::domain::{
     delete_faba_plus_figure, ensure_editable, export_figure as export_figure_to, looks_like_card,
-    require_figure, scan_card as scan_card_path, write_faba_plus_figure, CardKind, CardSnapshot,
+    require_figure, scan_card as scan_card_path, write_faba_plus_figure_with_trace, CardKind,
+    CardSnapshot,
 };
 use crate::storage::{LibraryDatabase, RecentCard};
 use serde::Serialize;
@@ -11,6 +13,7 @@ use tauri::{AppHandle, Manager, State};
 #[derive(Debug)]
 pub struct AppState {
     pub database: LibraryDatabase,
+    pub diagnostics: DiagnosticLogger,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,7 +37,7 @@ pub struct MutationResult {
 }
 
 #[tauri::command]
-pub fn detect_cards() -> Vec<DetectedCard> {
+pub fn detect_cards(state: State<'_, AppState>) -> Vec<DetectedCard> {
     let disks = Disks::new_with_refreshed_list();
     let mut cards = disks
         .list()
@@ -63,6 +66,9 @@ pub fn detect_cards() -> Vec<DetectedCard> {
             .cmp(&left.likely_faba)
             .then(left.label.cmp(&right.label))
     });
+    state
+        .diagnostics
+        .info("cards.detect", format!("removable_or_faba={}", cards.len()));
     cards
 }
 
@@ -73,7 +79,44 @@ pub fn recent_cards(state: State<'_, AppState>) -> Result<Vec<RecentCard>, Strin
 
 #[tauri::command]
 pub fn scan_card(path: String, state: State<'_, AppState>) -> Result<CardSnapshot, String> {
-    load_snapshot(&path, &state.database)
+    state
+        .diagnostics
+        .info("card.scan.start", format!("path={path}"));
+    match load_snapshot(&path, &state.database) {
+        Ok(snapshot) => {
+            state.diagnostics.info(
+                "card.scan.success",
+                format!(
+                    "path={} kind={:?} figures={} writable={}",
+                    snapshot.root_path,
+                    snapshot.kind,
+                    snapshot.figures.len(),
+                    snapshot.writable
+                ),
+            );
+            Ok(snapshot)
+        }
+        Err(error) => {
+            state
+                .diagnostics
+                .error("card.scan.error", format!("path={path} error={error}"));
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticReport, String> {
+    state.diagnostics.report().map_err(display_error)
+}
+
+#[tauri::command]
+pub fn clear_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticReport, String> {
+    state.diagnostics.clear().map_err(display_error)?;
+    state
+        .diagnostics
+        .info("diagnostics.clear", "journal effacé par l'utilisateur");
+    state.diagnostics.report().map_err(display_error)
 }
 
 #[tauri::command]
@@ -85,10 +128,20 @@ pub fn save_figure(
     audio_paths: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, String> {
-    let before = scan_card_path(Path::new(&root_path)).map_err(display_error)?;
-    ensure_editable(&before).map_err(display_error)?;
+    state.diagnostics.info(
+        "figure.save.start",
+        format!(
+            "card={root_path} figure=K{figure_id} tracks={}",
+            audio_paths.len()
+        ),
+    );
+    let before = scan_card_path(Path::new(&root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
+    ensure_editable(&before)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
 
-    let backup_root = backup_root(&app, &root_path)?;
+    let backup_root = backup_root(&app, &root_path)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
     let paths = audio_paths.iter().map(PathBuf::from).collect::<Vec<_>>();
     let labels = paths
         .iter()
@@ -99,19 +152,30 @@ pub fn save_figure(
                 .to_owned()
         })
         .collect::<Vec<_>>();
-    let backup = write_faba_plus_figure(
+    let trace = |step: &str| {
+        state.diagnostics.info(
+            "figure.save.step",
+            format!(
+                "card={} figure=K{} step={step}",
+                before.root_path, figure_id
+            ),
+        );
+    };
+    let backup = write_faba_plus_figure_with_trace(
         Path::new(&before.root_path),
         &figure_id,
         &paths,
         &backup_root,
+        &trace,
     )
-    .map_err(display_error)?;
+    .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
 
-    let mut snapshot = scan_card_path(Path::new(&before.root_path)).map_err(display_error)?;
+    let mut snapshot = scan_card_path(Path::new(&before.root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
     state
         .database
         .sync_snapshot(&snapshot)
-        .map_err(display_error)?;
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
     let name = custom_name.trim();
     state
         .database
@@ -120,16 +184,20 @@ pub fn save_figure(
             &figure_id,
             (!name.is_empty()).then_some(name),
         )
-        .map_err(display_error)?;
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
     state
         .database
         .set_track_labels(&snapshot.root_path, &figure_id, &labels)
-        .map_err(display_error)?;
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
     state
         .database
         .decorate_snapshot(&mut snapshot)
-        .map_err(display_error)?;
+        .map_err(|error| logged_error(&state.diagnostics, "figure.save.error", error))?;
 
+    state.diagnostics.info(
+        "figure.save.success",
+        format!("card={} figure=K{figure_id}", snapshot.root_path),
+    );
     Ok(MutationResult {
         snapshot,
         backup_path: backup.map(|path| path.to_string_lossy().into_owned()),
@@ -148,12 +216,18 @@ pub fn rename_figure(
     custom_name: String,
     state: State<'_, AppState>,
 ) -> Result<CardSnapshot, String> {
-    let snapshot = scan_card_path(Path::new(&root_path)).map_err(display_error)?;
-    require_figure(&snapshot, &figure_id).map_err(display_error)?;
+    state.diagnostics.info(
+        "figure.rename.start",
+        format!("card={root_path} figure=K{figure_id}"),
+    );
+    let snapshot = scan_card_path(Path::new(&root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "figure.rename.error", error))?;
+    require_figure(&snapshot, &figure_id)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.rename.error", error))?;
     state
         .database
         .sync_snapshot(&snapshot)
-        .map_err(display_error)?;
+        .map_err(|error| logged_error(&state.diagnostics, "figure.rename.error", error))?;
     let name = custom_name.trim();
     state
         .database
@@ -162,8 +236,14 @@ pub fn rename_figure(
             &figure_id,
             (!name.is_empty()).then_some(name),
         )
-        .map_err(display_error)?;
-    load_snapshot(&snapshot.root_path, &state.database)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.rename.error", error))?;
+    let result = load_snapshot(&snapshot.root_path, &state.database)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.rename.error", error))?;
+    state.diagnostics.info(
+        "figure.rename.success",
+        format!("card={} figure=K{figure_id}", snapshot.root_path),
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -173,23 +253,35 @@ pub fn delete_figure(
     figure_id: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, String> {
-    let before = scan_card_path(Path::new(&root_path)).map_err(display_error)?;
-    ensure_editable(&before).map_err(display_error)?;
-    require_figure(&before, &figure_id).map_err(display_error)?;
+    state.diagnostics.info(
+        "figure.delete.start",
+        format!("card={root_path} figure=K{figure_id}"),
+    );
+    let before = scan_card_path(Path::new(&root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
+    ensure_editable(&before)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
+    require_figure(&before, &figure_id)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
     if before.kind != CardKind::FabaPlus {
-        return Err("La suppression est réservée aux cartes FABA+.".into());
+        let error = "La suppression est réservée aux cartes FABA+.";
+        state.diagnostics.error("figure.delete.error", error);
+        return Err(error.into());
     }
-    let backup = delete_faba_plus_figure(
-        Path::new(&before.root_path),
-        &figure_id,
-        &backup_root(&app, &root_path)?,
-    )
-    .map_err(display_error)?;
+    let backup_path = backup_root(&app, &root_path)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
+    let backup = delete_faba_plus_figure(Path::new(&before.root_path), &figure_id, &backup_path)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
     state
         .database
         .remove_figure(&before.root_path, &figure_id)
-        .map_err(display_error)?;
-    let snapshot = load_snapshot(&before.root_path, &state.database)?;
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
+    let snapshot = load_snapshot(&before.root_path, &state.database)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.delete.error", error))?;
+    state.diagnostics.info(
+        "figure.delete.success",
+        format!("card={} figure=K{figure_id}", before.root_path),
+    );
     Ok(MutationResult {
         snapshot,
         backup_path: Some(backup.to_string_lossy().into_owned()),
@@ -202,16 +294,31 @@ pub fn export_figure(
     root_path: String,
     figure_id: String,
     destination_path: String,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let snapshot = scan_card_path(Path::new(&root_path)).map_err(display_error)?;
-    require_figure(&snapshot, &figure_id).map_err(display_error)?;
-    export_figure_to(
+    state.diagnostics.info(
+        "figure.export.start",
+        format!("card={root_path} figure=K{figure_id} destination={destination_path}"),
+    );
+    let snapshot = scan_card_path(Path::new(&root_path))
+        .map_err(|error| logged_error(&state.diagnostics, "figure.export.error", error))?;
+    require_figure(&snapshot, &figure_id)
+        .map_err(|error| logged_error(&state.diagnostics, "figure.export.error", error))?;
+    let exported = export_figure_to(
         Path::new(&snapshot.root_path),
         &figure_id,
         Path::new(&destination_path),
     )
     .map(|path| path.to_string_lossy().into_owned())
-    .map_err(display_error)
+    .map_err(|error| logged_error(&state.diagnostics, "figure.export.error", error))?;
+    state.diagnostics.info(
+        "figure.export.success",
+        format!(
+            "card={} figure=K{figure_id} path={exported}",
+            snapshot.root_path
+        ),
+    );
+    Ok(exported)
 }
 
 fn load_snapshot(path: &str, database: &LibraryDatabase) -> Result<CardSnapshot, String> {
@@ -236,5 +343,15 @@ fn backup_root(app: &AppHandle, card_root: &str) -> Result<PathBuf, String> {
 }
 
 fn display_error(error: impl std::fmt::Display) -> String {
-    error.to_string()
+    format!("{error:#}")
+}
+
+fn logged_error(
+    diagnostics: &DiagnosticLogger,
+    event: &str,
+    error: impl std::fmt::Display,
+) -> String {
+    let message = format!("{error:#}");
+    diagnostics.error(event, &message);
+    message
 }

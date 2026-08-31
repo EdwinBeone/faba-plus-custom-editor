@@ -28,6 +28,7 @@ Les excellentes recherches de [`wansors/myfaba-hacks`](https://github.com/wansor
 - lecture des pistes directement depuis la carte ;
 - copie du code NFC `02190530XXXX00` ;
 - export d'une figurine vers un dossier choisi ;
+- journal technique local consultable, copiable et effaçable depuis l'application ;
 - détection de l'ancien format FABA en lecture seule.
 
 ## Installation
@@ -64,6 +65,12 @@ Avant de remplacer ou retirer une figurine, son dossier complet est copié dans 
 - Linux : `~/.local/share/be.edwin.fabapluscustomeditor/backups`
 
 Une sauvegarde ne remplace pas une copie complète de la carte microSD avant la première utilisation.
+
+## Diagnostic
+
+Le bouton **Diagnostic technique** ouvre le journal local de l'application. Il indique les étapes d'écriture, le chemin de la carte, l'identifiant de figurine et la cause système complète d'une erreur. Il n'enregistre ni le contenu des fichiers audio ni leurs données binaires.
+
+Le journal peut être actualisé, copié pour un rapport de bug ou effacé directement depuis cette fenêtre.
 
 ## Développement
 

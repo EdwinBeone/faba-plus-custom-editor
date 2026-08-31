@@ -210,12 +210,24 @@ fn has_figure_folders(path: &Path) -> bool {
         })
 }
 
+#[cfg(test)]
 pub fn write_faba_plus_figure(
     root: &Path,
     figure_id: &str,
     audio_paths: &[PathBuf],
     backup_root: &Path,
 ) -> Result<Option<PathBuf>> {
+    write_faba_plus_figure_with_trace(root, figure_id, audio_paths, backup_root, &|_| {})
+}
+
+pub fn write_faba_plus_figure_with_trace(
+    root: &Path,
+    figure_id: &str,
+    audio_paths: &[PathBuf],
+    backup_root: &Path,
+    trace: &dyn Fn(&str),
+) -> Result<Option<PathBuf>> {
+    trace("validation des paramètres");
     validate_figure_id(figure_id)?;
     if audio_paths.is_empty() || audio_paths.len() > 99 {
         bail!("Choisissez entre 1 et 99 fichiers MP3.");
@@ -239,6 +251,7 @@ pub fn write_faba_plus_figure(
     let folder_name = format!("K{figure_id}");
     let destination = root.join(&folder_name);
     let backup = if destination.exists() {
+        trace("création de la sauvegarde locale avant remplacement");
         Some(backup_directory(&destination, backup_root, &folder_name)?)
     } else {
         None
@@ -246,9 +259,11 @@ pub fn write_faba_plus_figure(
 
     let nonce = unique_nonce();
     let staging = root.join(format!(".faba-editor-{folder_name}-{nonce}"));
+    trace("création du dossier temporaire sur la carte");
     fs::create_dir(&staging).context("Impossible de créer le dossier temporaire sur la carte.")?;
 
     let result = (|| -> Result<()> {
+        trace(&format!("copie de {} piste(s) MP3", audio_paths.len()));
         for (index, source) in audio_paths.iter().enumerate() {
             let target = staging.join(format!("CP{index:02}.faba"));
             fs::copy(source, &target).with_context(|| {
@@ -259,14 +274,27 @@ pub fn write_faba_plus_figure(
             "totalTracks": audio_paths.len(),
             "characterDir": format!("02190530{figure_id}00")
         });
-        let mut info_file = fs::File::create(staging.join("info"))?;
-        info_file.write_all(info.to_string().as_bytes())?;
-        info_file.sync_all()?;
+        trace("écriture et synchronisation du fichier info");
+        // Keep the file handle in a dedicated scope so it is closed before the
+        // staging directory is renamed. Windows refuses to rename a directory
+        // while a file inside it is still open.
+        {
+            let mut info_file = fs::File::create(staging.join("info"))
+                .context("Impossible de créer le fichier info sur la carte.")?;
+            info_file
+                .write_all(info.to_string().as_bytes())
+                .context("Impossible d'écrire le fichier info sur la carte.")?;
+            info_file
+                .sync_all()
+                .context("Impossible de synchroniser le fichier info sur la carte.")?;
+        }
 
         let previous = root.join(format!(".{folder_name}-previous-{nonce}"));
         if destination.exists() {
+            trace("mise à l'écart atomique de l'ancienne figurine");
             fs::rename(&destination, &previous)
                 .context("Impossible de préparer le remplacement de la figurine.")?;
+            trace("activation du nouveau dossier de figurine");
             if let Err(error) = fs::rename(&staging, &destination) {
                 let _ = fs::rename(&previous, &destination);
                 return Err(error)
@@ -274,13 +302,16 @@ pub fn write_faba_plus_figure(
             }
             fs::remove_dir_all(previous)?;
         } else {
+            trace("activation du nouveau dossier de figurine");
             fs::rename(&staging, &destination)
                 .context("Impossible de finaliser l'écriture sur la carte.")?;
         }
+        trace("écriture terminée avec succès");
         Ok(())
     })();
 
     if result.is_err() && staging.exists() {
+        trace("nettoyage du dossier temporaire après erreur");
         let _ = fs::remove_dir_all(&staging);
     }
     result?;

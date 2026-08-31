@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Bug,
   Check,
   ChevronRight,
   CircleHelp,
@@ -82,6 +83,11 @@ type MutationResult = {
   message: string;
 };
 
+type DiagnosticReport = {
+  content: string;
+  path: string;
+};
+
 type Toast = { tone: "success" | "error" | "info"; message: string };
 
 const kindLabels: Record<CardKind, string> = {
@@ -101,6 +107,7 @@ function App() {
   const [sourceBusy, setSourceBusy] = useState(true);
   const [toast, setToast] = useState<Toast | null>(null);
   const [editorFigure, setEditorFigure] = useState<Figure | "new" | null>(null);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   const refreshSources = async () => {
     setSourceBusy(true);
@@ -281,6 +288,9 @@ function App() {
           </button>
           <button className="nav-item" type="button" onClick={pickCardFolder}>
             <FolderOpen size={18} /> Ouvrir un dossier
+          </button>
+          <button className="nav-item" type="button" onClick={() => setDiagnosticsOpen(true)}>
+            <Bug size={18} /> Diagnostic technique
           </button>
         </nav>
 
@@ -538,6 +548,95 @@ function App() {
           onError={(message) => showToast("error", message)}
         />
       )}
+
+      {diagnosticsOpen && (
+        <DiagnosticsModal
+          onClose={() => setDiagnosticsOpen(false)}
+          onNotify={showToast}
+        />
+      )}
+    </div>
+  );
+}
+
+function DiagnosticsModal({
+  onClose,
+  onNotify,
+}: {
+  onClose: () => void;
+  onNotify: (tone: Toast["tone"], message: string) => void;
+}) {
+  const [report, setReport] = useState<DiagnosticReport | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadReport = async () => {
+    setLoading(true);
+    try {
+      setReport(await invoke<DiagnosticReport>("get_diagnostics"));
+    } catch (error) {
+      onNotify("error", stringifyError(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadReport();
+  }, []);
+
+  const copyReport = async () => {
+    if (!report) return;
+    await navigator.clipboard.writeText(report.content);
+    onNotify("success", "Journal technique copié.");
+  };
+
+  const clearReport = async () => {
+    setLoading(true);
+    try {
+      setReport(await invoke<DiagnosticReport>("clear_diagnostics"));
+      onNotify("success", "Journal technique effacé.");
+    } catch (error) {
+      onNotify("error", stringifyError(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="diagnostics-title">
+        <div className="modal-header">
+          <div>
+            <span className="modal-icon diagnostics-icon"><Bug size={20} /></span>
+            <div><p>Assistance et débogage</p><h2 id="diagnostics-title">Diagnostic technique</h2></div>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Fermer"><X size={17} /></button>
+        </div>
+        <div className="diagnostics-body">
+          <div className="diagnostics-intro">
+            <div>
+              <strong>Journal local de l’application</strong>
+              <p>Les opérations sur la carte et les erreurs système sont enregistrées ici. Aucun contenu audio n’est inclus.</p>
+            </div>
+            <button className="button secondary" type="button" onClick={loadReport} disabled={loading}>
+              <RefreshCw size={15} className={loading ? "spin" : ""} /> Actualiser
+            </button>
+          </div>
+          <div className="diagnostics-path" title={report?.path}>
+            <span>Fichier</span><code>{report?.path ?? "Chargement…"}</code>
+          </div>
+          <pre className="diagnostics-log" aria-live="polite">
+            {loading && !report ? "Chargement du journal…" : report?.content || "Le journal est vide."}
+          </pre>
+        </div>
+        <div className="modal-footer diagnostics-footer">
+          <span><ShieldCheck size={16} /> Conservé uniquement sur cet ordinateur</span>
+          <div>
+            <button className="button secondary" type="button" onClick={clearReport} disabled={loading}><Trash2 size={15} /> Effacer</button>
+            <button className="button primary" type="button" onClick={copyReport} disabled={!report?.content}><Copy size={15} /> Copier les logs</button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -683,7 +782,7 @@ function FigureEditor({
         <form onSubmit={submit}>
           <div className="modal-body">
             <div className="form-grid">
-              <label><span>Identifiant de figurine</span><div className="id-input"><b>K</b><input value={figureId} onChange={(event) => setFigureId(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="0742" disabled={Boolean(initialFigure)} inputMode="numeric" /></div><small>4 chiffres, liés au code de votre tag NFC.</small></label>
+              <label><span>Identifiant de figurine</span><div className="id-input"><b>K</b><input value={figureId} onChange={(event) => setFigureId(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="0742" disabled={Boolean(initialFigure)} inputMode="numeric" /></div><small>Choisissez un numéro libre entre 0001 et 9999. Il sera ensuite encodé sur un tag NFC vierge.</small></label>
               <label><span>Nom dans ma bibliothèque</span><input value={customName} onChange={(event) => setCustomName(event.target.value)} placeholder="Histoires du soir" maxLength={80} /><small>Conservé uniquement sur cet ordinateur.</small></label>
             </div>
 

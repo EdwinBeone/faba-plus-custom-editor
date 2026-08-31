@@ -46,7 +46,7 @@ jobs:
           tagName: v__VERSION__
           releaseName: FABA+ Custom Editor v__VERSION__
           releaseBody: |
-            Première version publique de FABA+ Custom Editor.
+            Version publique de FABA+ Custom Editor. Consultez le CHANGELOG du dépôt pour le détail des changements.
 
             Téléchargez l'installateur adapté à votre système dans la liste des fichiers ci-dessous. Ces binaires communautaires ne sont pas encore signés.
           releaseDraft: false
