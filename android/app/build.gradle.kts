@@ -55,7 +55,7 @@ android {
 
 dependencies {
     // 2026.06 remains compatible with compileSdk 36, which is available on public CI images.
-    val composeBom = platform("androidx.compose:compose-bom:2026.06.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
