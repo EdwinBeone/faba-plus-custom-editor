@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -67,6 +68,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
+private const val NFC_LOG_TAG = "FabaNfc"
+
 class MainActivity : ComponentActivity() {
     private val api = ApiClient()
     private val updateClient = GitHubUpdateClient()
@@ -79,6 +82,7 @@ class MainActivity : ComponentActivity() {
     private var renameTarget by mutableStateOf<CloudPlaylist?>(null)
     private var deleteTarget by mutableStateOf<CloudPlaylist?>(null)
     private var pendingNfc by mutableStateOf<CloudPlaylist?>(null)
+    private var nfcProgress by mutableStateOf<NfcProgress?>(null)
     private var nfcResult by mutableStateOf<String?>(null)
     private var availableUpdate by mutableStateOf<AppUpdate?>(null)
     private var updateDialogVisible by mutableStateOf(false)
@@ -89,9 +93,8 @@ class MainActivity : ComponentActivity() {
     private var pendingInstallApk: File? = null
     private var pickerTarget: CloudPlaylist? = null
     private var nfcAdapter: NfcAdapter? = null
-    // A session is armed explicitly by the user and may consume exactly one tag.
-    // Keeping the gate closed after the callback also blocks queued reader events.
-    private val nfcWriteGate = NfcWriteGate()
+    @Volatile
+    private var nfcSession: NfcWriteSession? = null
 
     private val unknownSourcesLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val apk = pendingInstallApk ?: return@registerForActivityResult
@@ -164,6 +167,7 @@ class MainActivity : ComponentActivity() {
                     renameTarget = renameTarget,
                     deleteTarget = deleteTarget,
                     pendingNfc = pendingNfc,
+                    nfcProgress = nfcProgress,
                     nfcResult = nfcResult,
                     availableUpdate = availableUpdate,
                     updateDialogVisible = updateDialogVisible,
@@ -187,7 +191,7 @@ class MainActivity : ComponentActivity() {
                     onDeleteConfirm = ::deletePlaylist,
                     onArmNfc = ::armNfc,
                     onCancelNfc = ::cancelNfc,
-                    onDismissResult = { nfcResult = null },
+                    onDismissResult = ::dismissNfcResult,
                     onDismissStatus = { statusMessage = null },
                     onCheckUpdate = ::openOrCheckUpdate,
                     onInstallUpdate = ::downloadAndInstallUpdate,
@@ -201,7 +205,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (pendingNfc != null && nfcWriteGate.isArmed()) enableNfcReader()
+        val currentSession = nfcSession
+        val playlist = pendingNfc
+        if (currentSession != null && playlist != null && currentSession.acceptsReaderCallbacks()) {
+            val purpose = when (currentSession.currentPhase()) {
+                NfcSessionPhase.WAITING_FOR_TAG -> NfcReaderPurpose.INITIAL
+                NfcSessionPhase.WAITING_FOR_VERIFICATION -> NfcReaderPurpose.VERIFICATION
+                else -> null
+            }
+            if (purpose != null) enableNfcReader(currentSession, playlist, purpose)
+        }
     }
 
     override fun onPause() {
@@ -476,75 +489,274 @@ class MainActivity : ComponentActivity() {
             statusMessage = "Activez le NFC dans les réglages du téléphone puis réessayez."
             return
         }
+        nfcSession?.cancel()
+        adapter.disableReaderMode(this)
+        val newSession = NfcWriteSession()
+        nfcSession = newSession
         pendingNfc = playlist
-        nfcWriteGate.arm()
+        nfcProgress = NfcProgress(
+            currentStep = 0,
+            message = "Approchez et maintenez le tag contre le téléphone.",
+        )
+        nfcResult = null
         statusMessage = null
-        enableNfcReader()
+        Log.i(NFC_LOG_TAG, "session=${newSession.id} armed figure=K${playlist.figureId}")
+        enableNfcReader(newSession, playlist, NfcReaderPurpose.INITIAL)
     }
 
-    private fun enableNfcReader() {
+    private fun enableNfcReader(
+        nfcSession: NfcWriteSession,
+        playlist: CloudPlaylist,
+        purpose: NfcReaderPurpose,
+    ) {
         val adapter = nfcAdapter ?: return
+        if (this.nfcSession !== nfcSession || !nfcSession.acceptsReaderCallbacks()) return
+        Log.i(
+            NFC_LOG_TAG,
+            "session=${nfcSession.id} reader enabled phase=${nfcSession.currentPhase()} purpose=$purpose",
+        )
         adapter.enableReaderMode(
             this,
-            { tag -> handleTag(tag) },
+            { tag -> handleTag(tag, nfcSession, playlist, purpose) },
             NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
                 NfcAdapter.FLAG_READER_NFC_F or NfcAdapter.FLAG_READER_NFC_V,
             null,
         )
     }
 
-    private fun handleTag(tag: Tag) {
-        if (!nfcWriteGate.tryConsume()) return
-        val playlist = pendingNfc ?: return
-        // Keep the tag handle alive until NDEF write + verification are complete.
-        // The consumed gate already rejects duplicate callbacks for the same nearby tag.
-        val result = writeNdef(tag, playlist.nfcPayload)
+    private fun handleTag(
+        tag: Tag,
+        nfcSession: NfcWriteSession,
+        playlist: CloudPlaylist,
+        purpose: NfcReaderPurpose,
+    ) {
+        if (this.nfcSession !== nfcSession) {
+            Log.i(NFC_LOG_TAG, "session=${nfcSession.id} ignored callback from an obsolete reader")
+            return
+        }
+        val tagId = tag.id.joinToString("") { "%02X".format(it.toInt() and 0xff) }
+        when (purpose) {
+            NfcReaderPurpose.INITIAL -> if (nfcSession.beginInspection()) {
+                Log.i(NFC_LOG_TAG, "session=${nfcSession.id} initial tag claimed uid=$tagId")
+                when (val outcome = inspectClearAndWrite(tag, playlist.nfcPayload, nfcSession)) {
+                    is NfcInitialOutcome.Complete -> finishNfc(nfcSession, playlist, outcome.result)
+                    NfcInitialOutcome.NeedsFreshVerification -> restartReaderForVerification(nfcSession, playlist)
+                }
+            } else {
+                Log.i(
+                    NFC_LOG_TAG,
+                    "session=${nfcSession.id} initial callback ignored phase=${nfcSession.currentPhase()} uid=$tagId",
+                )
+            }
+
+            NfcReaderPurpose.VERIFICATION -> if (nfcSession.beginVerification()) {
+                Log.i(NFC_LOG_TAG, "session=${nfcSession.id} verification tag claimed uid=$tagId")
+                updateNfcProgress(nfcSession, 4, "Vérification des données écrites…")
+                finishNfc(nfcSession, playlist, verifyNdef(tag, playlist.nfcPayload, nfcSession))
+            } else {
+                Log.i(
+                    NFC_LOG_TAG,
+                    "session=${nfcSession.id} verification callback ignored phase=${nfcSession.currentPhase()} uid=$tagId",
+                )
+            }
+        }
+    }
+
+    private fun cancelNfc() {
+        val currentSession = nfcSession
+        currentSession?.cancel()
+        if (currentSession != null) Log.i(NFC_LOG_TAG, "session=${currentSession.id} cancelled")
+        nfcSession = null
+        pendingNfc = null
+        nfcProgress = null
+        nfcAdapter?.disableReaderMode(this)
+    }
+
+    private fun dismissNfcResult() {
+        val currentSession = nfcSession
+        if (currentSession?.currentPhase() == NfcSessionPhase.FINISHED) nfcSession = null
+        nfcResult = null
+    }
+
+    private fun inspectClearAndWrite(
+        tag: Tag,
+        payload: String,
+        nfcSession: NfcWriteSession,
+    ): NfcInitialOutcome {
+        val expectedMessage = ndefTextMessage(payload)
+        var currentStep = 1
+        return try {
+            updateNfcProgress(nfcSession, 1, "Vérification de l’état actuel du tag…")
+            ensureSessionPhase(nfcSession, NfcSessionPhase.INSPECTING)
+            val ndef = Ndef.get(tag)
+            if (ndef != null) {
+                ndef.connect()
+                try {
+                    val existingMessage = ndef.ndefMessage
+                    Log.i(
+                        NFC_LOG_TAG,
+                        "session=${nfcSession.id} step=1 inspected ndef=true writable=${ndef.isWritable} " +
+                            "maxSize=${ndef.maxSize} existingRecords=${existingMessage?.records?.size ?: 0}",
+                    )
+                    if (!ndef.isWritable) {
+                        return NfcInitialOutcome.Complete(NfcWriteResult(false, "Ce tag NFC est verrouillé en lecture seule."))
+                    }
+                    if (ndef.maxSize < expectedMessage.toByteArray().size) {
+                        return NfcInitialOutcome.Complete(NfcWriteResult(false, "Ce tag NFC n'a pas assez de mémoire."))
+                    }
+
+                    advanceNfcStep(nfcSession.beginClearing())
+                    currentStep = 2
+                    updateNfcProgress(nfcSession, 2, "Suppression des anciennes données…")
+                    ensureSessionPhase(nfcSession, NfcSessionPhase.CLEARING)
+                    if (isEmptyNdef(existingMessage)) {
+                        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=2 no existing data")
+                    } else {
+                        val emptyMessage = emptyNdefMessage()
+                        ndef.writeNdefMessage(emptyMessage)
+                        if (!isEmptyNdef(ndef.ndefMessage)) {
+                            return NfcInitialOutcome.Complete(
+                                NfcWriteResult(false, "Les anciennes données du tag n'ont pas pu être supprimées."),
+                            )
+                        }
+                        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=2 existing data cleared")
+                    }
+
+                    advanceNfcStep(nfcSession.beginWriting())
+                    currentStep = 3
+                    updateNfcProgress(nfcSession, 3, "Écriture du nouveau contenu…")
+                    ensureSessionPhase(nfcSession, NfcSessionPhase.WRITING)
+                    ndef.writeNdefMessage(expectedMessage)
+                    Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=3 payload written")
+
+                    advanceNfcStep(nfcSession.beginInlineVerification())
+                    currentStep = 4
+                    updateNfcProgress(nfcSession, 4, "Vérification des données écrites…")
+                    ensureSessionPhase(nfcSession, NfcSessionPhase.VERIFYING)
+                    val verified = ndef.ndefMessage?.toByteArray()?.contentEquals(expectedMessage.toByteArray()) == true
+                    if (!verified) {
+                        return NfcInitialOutcome.Complete(
+                            NfcWriteResult(false, "Le tag a été écrit, mais la vérification a échoué. Réessayez avec un autre tag."),
+                        )
+                    }
+                    Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=4 payload verified")
+                } finally {
+                    ndef.close()
+                }
+            } else {
+                val formatable = NdefFormatable.get(tag)
+                    ?: return NfcInitialOutcome.Complete(NfcWriteResult(false, "Ce tag NFC n'est pas compatible NDEF."))
+                Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=1 inspected ndef=false formatable=true")
+
+                advanceNfcStep(nfcSession.beginClearing())
+                currentStep = 2
+                updateNfcProgress(nfcSession, 2, "Aucune ancienne donnée à supprimer.")
+                ensureSessionPhase(nfcSession, NfcSessionPhase.CLEARING)
+                Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=2 unformatted tag has no existing NDEF data")
+
+                advanceNfcStep(nfcSession.beginWriting())
+                currentStep = 3
+                updateNfcProgress(nfcSession, 3, "Formatage et écriture du nouveau contenu…")
+                ensureSessionPhase(nfcSession, NfcSessionPhase.WRITING)
+                formatable.connect()
+                try {
+                    formatable.format(expectedMessage)
+                    Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=3 tag formatted and payload written")
+                } finally {
+                    formatable.close()
+                }
+                return NfcInitialOutcome.NeedsFreshVerification
+            }
+            NfcInitialOutcome.Complete(NfcWriteResult(true, "Tag NFC écrit et vérifié."))
+        } catch (error: Exception) {
+            Log.e(NFC_LOG_TAG, "session=${nfcSession.id} failed at step=$currentStep", error)
+            NfcInitialOutcome.Complete(
+                NfcWriteResult(
+                    false,
+                    "Étape $currentStep/4 impossible : ${error.message ?: "tag incompatible ou retiré trop tôt"}.",
+                ),
+            )
+        }
+    }
+
+    private fun restartReaderForVerification(nfcSession: NfcWriteSession, playlist: CloudPlaylist) {
         runOnUiThread {
+            if (this.nfcSession !== nfcSession) return@runOnUiThread
+            nfcAdapter?.disableReaderMode(this)
+            if (!nfcSession.awaitFreshVerification()) return@runOnUiThread
+            Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=4 waiting for fresh NDEF discovery")
+            nfcProgress = NfcProgress(
+                currentStep = 4,
+                message = "Vérification finale… Maintenez encore le tag contre le téléphone.",
+            )
+            enableNfcReader(nfcSession, playlist, NfcReaderPurpose.VERIFICATION)
+        }
+    }
+
+    private fun verifyNdef(tag: Tag, payload: String, nfcSession: NfcWriteSession): NfcWriteResult {
+        val expectedMessage = ndefTextMessage(payload)
+        return try {
+            val ndef = Ndef.get(tag)
+                ?: return NfcWriteResult(false, "Le tag a été écrit, mais il n'est pas lisible en NDEF pour la vérification.")
+            ndef.connect()
+            try {
+                if (nfcSession.currentPhase() != NfcSessionPhase.VERIFYING) throw IOException("Session NFC annulée")
+                val verified = ndef.ndefMessage?.toByteArray()?.contentEquals(expectedMessage.toByteArray()) == true
+                if (!verified) {
+                    return NfcWriteResult(false, "Le tag a été écrit, mais la vérification a échoué. Réessayez avec un autre tag.")
+                }
+            } finally {
+                ndef.close()
+            }
+            Log.i(NFC_LOG_TAG, "session=${nfcSession.id} step=4 payload verified after formatting")
+            NfcWriteResult(true, "Tag NFC écrit et vérifié.")
+        } catch (error: Exception) {
+            Log.e(NFC_LOG_TAG, "session=${nfcSession.id} failed at step=4", error)
+            NfcWriteResult(false, "Étape 4/4 impossible : ${error.message ?: "tag incompatible ou retiré trop tôt"}.")
+        }
+    }
+
+    private fun finishNfc(nfcSession: NfcWriteSession, playlist: CloudPlaylist, result: NfcWriteResult) {
+        if (!nfcSession.finish()) return
+        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} finished success=${result.success}; reader will be disabled")
+        runOnUiThread {
+            if (this.nfcSession !== nfcSession) return@runOnUiThread
             nfcAdapter?.disableReaderMode(this)
             pendingNfc = null
+            nfcProgress = null
             nfcResult = if (result.success) {
-                "Tag prêt pour « ${playlist.name} » (K${playlist.figureId})."
+                "Les 4 étapes sont terminées. Tag prêt pour « ${playlist.name} » (K${playlist.figureId})."
             } else {
                 result.message
             }
         }
     }
 
-    private fun cancelNfc() {
-        nfcWriteGate.cancel()
-        pendingNfc = null
-        nfcAdapter?.disableReaderMode(this)
+    private fun updateNfcProgress(nfcSession: NfcWriteSession, currentStep: Int, message: String) {
+        runOnUiThread {
+            if (this.nfcSession === nfcSession && pendingNfc != null) {
+                nfcProgress = NfcProgress(currentStep, message)
+            }
+        }
     }
 
-    private fun writeNdef(tag: Tag, payload: String): NfcWriteResult {
-        val message = NdefMessage(arrayOf(NdefRecord.createTextRecord("fr", payload)))
-        return try {
-            val ndef = Ndef.get(tag)
-            if (ndef != null) {
-                ndef.connect()
-                try {
-                    if (!ndef.isWritable) return NfcWriteResult(false, "Ce tag NFC est verrouillé en lecture seule.")
-                    if (ndef.maxSize < message.toByteArray().size) return NfcWriteResult(false, "Ce tag NFC n'a pas assez de mémoire.")
-                    ndef.writeNdefMessage(message)
-                    val verified = ndef.ndefMessage?.toByteArray()?.contentEquals(message.toByteArray()) == true
-                    if (!verified) return NfcWriteResult(false, "Le tag a été écrit, mais la vérification a échoué. Réessayez avec un autre tag.")
-                } finally {
-                    ndef.close()
-                }
-            } else {
-                val formatable = NdefFormatable.get(tag)
-                    ?: return NfcWriteResult(false, "Ce tag NFC n'est pas compatible NDEF.")
-                formatable.connect()
-                try {
-                    formatable.format(message)
-                } finally {
-                    formatable.close()
-                }
-            }
-            NfcWriteResult(true, "Tag NFC écrit et vérifié.")
-        } catch (error: Exception) {
-            NfcWriteResult(false, "Écriture NFC impossible : ${error.message ?: "tag incompatible ou retiré trop tôt"}.")
-        }
+    private fun advanceNfcStep(advanced: Boolean) {
+        if (!advanced) throw IOException("Session NFC annulée")
+    }
+
+    private fun ensureSessionPhase(nfcSession: NfcWriteSession, expected: NfcSessionPhase) {
+        if (nfcSession.currentPhase() != expected) throw IOException("Session NFC annulée")
+    }
+
+    private fun ndefTextMessage(payload: String): NdefMessage =
+        NdefMessage(arrayOf(NdefRecord.createTextRecord("fr", payload)))
+
+    private fun emptyNdefMessage(): NdefMessage = NdefMessage(
+        arrayOf(NdefRecord(NdefRecord.TNF_EMPTY, byteArrayOf(), byteArrayOf(), byteArrayOf())),
+    )
+
+    private fun isEmptyNdef(message: NdefMessage?): Boolean = message == null || message.records.all { record ->
+        record.tnf == NdefRecord.TNF_EMPTY && record.type.isEmpty() && record.id.isEmpty() && record.payload.isEmpty()
     }
 
     private fun displayName(uri: Uri): String {
@@ -581,6 +793,21 @@ data class DraftTrack(
 
 private data class NfcWriteResult(val success: Boolean, val message: String)
 
+private sealed interface NfcInitialOutcome {
+    data class Complete(val result: NfcWriteResult) : NfcInitialOutcome
+    data object NeedsFreshVerification : NfcInitialOutcome
+}
+
+private data class NfcProgress(
+    val currentStep: Int,
+    val message: String,
+)
+
+private enum class NfcReaderPurpose {
+    INITIAL,
+    VERIFICATION,
+}
+
 @Composable
 private fun FabaApp(
     session: AccountSession?,
@@ -591,6 +818,7 @@ private fun FabaApp(
     renameTarget: CloudPlaylist?,
     deleteTarget: CloudPlaylist?,
     pendingNfc: CloudPlaylist?,
+    nfcProgress: NfcProgress?,
     nfcResult: String?,
     availableUpdate: AppUpdate?,
     updateDialogVisible: Boolean,
@@ -648,8 +876,13 @@ private fun FabaApp(
         AlertDialog(
             onDismissRequest = onCancelNfc,
             icon = { Text("◉", color = MaterialTheme.colorScheme.primary, fontSize = 34.sp) },
-            title = { Text("Approchez le tag NFC") },
-            text = { Text("Maintenez le tag contre le téléphone pour préparer K${playlist.figureId} — ${playlist.name}. Le code est verrouillé par l'application.") },
+            title = { Text(if ((nfcProgress?.currentStep ?: 0) == 0) "Approchez le tag NFC" else "Préparation du tag") },
+            text = {
+                NfcProgressContent(
+                    playlist = playlist,
+                    progress = nfcProgress ?: NfcProgress(0, "Approchez et maintenez le tag contre le téléphone."),
+                )
+            },
             confirmButton = {},
             dismissButton = { TextButton(onClick = onCancelNfc) { Text("Annuler") } },
         )
@@ -657,7 +890,7 @@ private fun FabaApp(
     nfcResult?.let { message ->
         AlertDialog(
             onDismissRequest = onDismissResult,
-            title = { Text(if (message.startsWith("Tag prêt")) "Tag NFC prêt" else "Résultat NFC") },
+            title = { Text(if (message.contains("Tag prêt")) "Tag NFC prêt" else "Résultat NFC") },
             text = { Text(message) },
             confirmButton = { Button(onClick = onDismissResult) { Text("Terminé") } },
         )
@@ -671,6 +904,41 @@ private fun FabaApp(
             onInstall = onInstallUpdate,
             onDismiss = onDismissUpdate,
         )
+    }
+}
+
+@Composable
+private fun NfcProgressContent(playlist: CloudPlaylist, progress: NfcProgress) {
+    val steps = listOf(
+        "Vérification de l’état actuel",
+        "Suppression des données présentes",
+        "Écriture du tag",
+        "Vérification du tag",
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            "K${playlist.figureId} — ${playlist.name}",
+            fontWeight = FontWeight.Bold,
+        )
+        steps.forEachIndexed { index, label ->
+            val step = index + 1
+            val isDone = progress.currentStep > step
+            val isCurrent = progress.currentStep == step
+            val marker = when {
+                isDone -> "✓"
+                isCurrent -> "●"
+                else -> "○"
+            }
+            val color = when {
+                isDone || isCurrent -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(marker, color = color, fontWeight = FontWeight.Bold, modifier = Modifier.padding(end = 10.dp))
+                Text(label, color = color, fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
+            }
+        }
+        Text(progress.message, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
     }
 }
 

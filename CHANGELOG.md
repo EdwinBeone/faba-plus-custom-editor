@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 0.5.1
+
+- remplacement du verrou NFC Android par une machine d'état atomique propre à chaque appui sur **Écrire le tag NFC** ;
+- ajout du parcours explicite en quatre étapes : inspection, suppression des anciennes données, écriture, puis relecture de vérification ;
+- affichage en direct de l'étape NFC en cours et ajout de journaux techniques `FabaNfc` dans Logcat ;
+- arrêt définitif du lecteur NFC dès le résultat obtenu : les callbacks répétés ou provenant d'une ancienne session sont ignorés jusqu'à la fermeture du résultat et un nouvel appui sur le bouton ;
+- prise en charge de la vérification après formatage d'un tag NDEF vierge au moyen d'une unique redétection contrôlée.
+
 ## 0.5.0
 
 - ajout de l'auto-update signé Tauri sur Windows, macOS et Linux, directement depuis la dernière release GitHub ;
