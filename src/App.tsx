@@ -321,9 +321,9 @@ function App() {
         if (preview.has("preview-library")) setCloudLibrary(browserPreviewLibrary);
         if (preview.has("preview-update")) {
           setDesktopUpdate({
-            currentVersion: "0.5.0",
-            version: "0.5.1",
-            body: "Écriture NFC Android en quatre étapes, strictement limitée à une seule session.",
+            currentVersion: "0.5.1",
+            version: "0.5.2",
+            body: "Protection du tag terminé contre l'ouverture automatique du lecteur NFC Android.",
           });
         }
       }

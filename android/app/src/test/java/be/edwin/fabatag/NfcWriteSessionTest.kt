@@ -74,4 +74,33 @@ class NfcWriteSessionTest {
         assertFalse(oldSession.beginInspection())
         assertTrue(newSession.beginInspection())
     }
+
+    @Test
+    fun readerGuardStopsOnlyAfterResultDismissalAndTagRemoval() {
+        val guard = NfcTagGuard()
+
+        assertTrue(guard.beginWaitingForRemoval())
+        assertFalse(guard.beginWaitingForRemoval())
+        assertFalse(guard.dismissResult())
+        assertTrue(guard.tagRemoved())
+        assertFalse(guard.isAwaitingRemoval())
+    }
+
+    @Test
+    fun readerGuardAlsoHandlesTagRemovalBeforeDialogDismissal() {
+        val guard = NfcTagGuard()
+
+        assertTrue(guard.beginWaitingForRemoval())
+        assertFalse(guard.tagRemoved())
+        assertTrue(guard.dismissResult())
+    }
+
+    @Test
+    fun interruptedGuardCanAcquireTheTagAgainAfterResume() {
+        val guard = NfcTagGuard()
+
+        assertTrue(guard.beginWaitingForRemoval())
+        guard.readerInterrupted()
+        assertTrue(guard.beginWaitingForRemoval())
+    }
 }

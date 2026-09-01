@@ -1,5 +1,6 @@
 package be.edwin.fabatag
 
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -69,4 +70,33 @@ internal class NfcWriteSession {
     private companion object {
         val nextId = AtomicLong(0)
     }
+}
+
+/** Coordinates the terminal reader guard without performing any NFC I/O. */
+internal class NfcTagGuard {
+    private val awaitingRemoval = AtomicBoolean(false)
+    private val resultDismissed = AtomicBoolean(false)
+
+    fun reset() {
+        awaitingRemoval.set(false)
+        resultDismissed.set(false)
+    }
+
+    fun beginWaitingForRemoval(): Boolean = awaitingRemoval.compareAndSet(false, true)
+
+    /** Returns true when reader mode can now safely be disabled. */
+    fun tagRemoved(): Boolean {
+        awaitingRemoval.set(false)
+        return resultDismissed.get()
+    }
+
+    /** Returns true when no tag is currently waiting to be removed. */
+    fun dismissResult(): Boolean {
+        resultDismissed.set(true)
+        return !awaitingRemoval.get()
+    }
+
+    fun readerInterrupted() = awaitingRemoval.set(false)
+
+    fun isAwaitingRemoval(): Boolean = awaitingRemoval.get()
 }

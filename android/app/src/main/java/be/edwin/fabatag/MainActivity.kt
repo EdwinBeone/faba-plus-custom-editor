@@ -11,6 +11,8 @@ import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
@@ -69,6 +71,7 @@ import java.io.File
 import java.io.IOException
 
 private const val NFC_LOG_TAG = "FabaNfc"
+private const val NFC_TAG_REMOVAL_DEBOUNCE_MS = 1_000
 
 class MainActivity : ComponentActivity() {
     private val api = ApiClient()
@@ -95,6 +98,8 @@ class MainActivity : ComponentActivity() {
     private var nfcAdapter: NfcAdapter? = null
     @Volatile
     private var nfcSession: NfcWriteSession? = null
+    private val nfcTagGuard = NfcTagGuard()
+    private val nfcMainHandler = Handler(Looper.getMainLooper())
 
     private val unknownSourcesLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val apk = pendingInstallApk ?: return@registerForActivityResult
@@ -207,17 +212,24 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         val currentSession = nfcSession
         val playlist = pendingNfc
-        if (currentSession != null && playlist != null && currentSession.acceptsReaderCallbacks()) {
-            val purpose = when (currentSession.currentPhase()) {
-                NfcSessionPhase.WAITING_FOR_TAG -> NfcReaderPurpose.INITIAL
-                NfcSessionPhase.WAITING_FOR_VERIFICATION -> NfcReaderPurpose.VERIFICATION
-                else -> null
+        if (currentSession != null) {
+            when (currentSession.currentPhase()) {
+                NfcSessionPhase.WAITING_FOR_TAG -> if (playlist != null) {
+                    enableNfcReader(currentSession, playlist, NfcReaderPurpose.INITIAL)
+                }
+
+                NfcSessionPhase.WAITING_FOR_VERIFICATION -> if (playlist != null) {
+                    enableNfcReader(currentSession, playlist, NfcReaderPurpose.VERIFICATION)
+                }
+
+                NfcSessionPhase.FINISHED -> enableNfcGuardReader(currentSession)
+                else -> Unit
             }
-            if (purpose != null) enableNfcReader(currentSession, playlist, purpose)
         }
     }
 
     override fun onPause() {
+        if (nfcSession?.currentPhase() == NfcSessionPhase.FINISHED) nfcTagGuard.readerInterrupted()
         nfcAdapter?.disableReaderMode(this)
         super.onPause()
     }
@@ -491,6 +503,7 @@ class MainActivity : ComponentActivity() {
         }
         nfcSession?.cancel()
         adapter.disableReaderMode(this)
+        nfcTagGuard.reset()
         val newSession = NfcWriteSession()
         nfcSession = newSession
         pendingNfc = playlist
@@ -539,25 +552,19 @@ class MainActivity : ComponentActivity() {
             NfcReaderPurpose.INITIAL -> if (nfcSession.beginInspection()) {
                 Log.i(NFC_LOG_TAG, "session=${nfcSession.id} initial tag claimed uid=$tagId")
                 when (val outcome = inspectClearAndWrite(tag, playlist.nfcPayload, nfcSession)) {
-                    is NfcInitialOutcome.Complete -> finishNfc(nfcSession, playlist, outcome.result)
+                    is NfcInitialOutcome.Complete -> finishNfc(tag, nfcSession, playlist, outcome.result)
                     NfcInitialOutcome.NeedsFreshVerification -> restartReaderForVerification(nfcSession, playlist)
                 }
             } else {
-                Log.i(
-                    NFC_LOG_TAG,
-                    "session=${nfcSession.id} initial callback ignored phase=${nfcSession.currentPhase()} uid=$tagId",
-                )
+                handleUnclaimedNfcTag(tag, nfcSession, "initial", tagId)
             }
 
             NfcReaderPurpose.VERIFICATION -> if (nfcSession.beginVerification()) {
                 Log.i(NFC_LOG_TAG, "session=${nfcSession.id} verification tag claimed uid=$tagId")
                 updateNfcProgress(nfcSession, 4, "Vérification des données écrites…")
-                finishNfc(nfcSession, playlist, verifyNdef(tag, playlist.nfcPayload, nfcSession))
+                finishNfc(tag, nfcSession, playlist, verifyNdef(tag, playlist.nfcPayload, nfcSession))
             } else {
-                Log.i(
-                    NFC_LOG_TAG,
-                    "session=${nfcSession.id} verification callback ignored phase=${nfcSession.currentPhase()} uid=$tagId",
-                )
+                handleUnclaimedNfcTag(tag, nfcSession, "verification", tagId)
             }
         }
     }
@@ -567,6 +574,7 @@ class MainActivity : ComponentActivity() {
         currentSession?.cancel()
         if (currentSession != null) Log.i(NFC_LOG_TAG, "session=${currentSession.id} cancelled")
         nfcSession = null
+        nfcTagGuard.reset()
         pendingNfc = null
         nfcProgress = null
         nfcAdapter?.disableReaderMode(this)
@@ -574,8 +582,14 @@ class MainActivity : ComponentActivity() {
 
     private fun dismissNfcResult() {
         val currentSession = nfcSession
-        if (currentSession?.currentPhase() == NfcSessionPhase.FINISHED) nfcSession = null
         nfcResult = null
+        if (currentSession?.currentPhase() == NfcSessionPhase.FINISHED) {
+            if (nfcTagGuard.dismissResult()) {
+                stopNfcGuard(currentSession)
+            } else {
+                Log.i(NFC_LOG_TAG, "session=${currentSession.id} result dismissed; guarding until tag removal")
+            }
+        }
     }
 
     private fun inspectClearAndWrite(
@@ -716,12 +730,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun finishNfc(nfcSession: NfcWriteSession, playlist: CloudPlaylist, result: NfcWriteResult) {
+    private fun finishNfc(
+        tag: Tag,
+        nfcSession: NfcWriteSession,
+        playlist: CloudPlaylist,
+        result: NfcWriteResult,
+    ) {
         if (!nfcSession.finish()) return
-        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} finished success=${result.success}; reader will be disabled")
+        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} finished success=${result.success}; native NFC dispatch guarded")
+        holdNfcTagUntilRemoved(tag, nfcSession)
         runOnUiThread {
             if (this.nfcSession !== nfcSession) return@runOnUiThread
-            nfcAdapter?.disableReaderMode(this)
             pendingNfc = null
             nfcProgress = null
             nfcResult = if (result.success) {
@@ -730,6 +749,67 @@ class MainActivity : ComponentActivity() {
                 result.message
             }
         }
+    }
+
+    private fun handleUnclaimedNfcTag(
+        tag: Tag,
+        nfcSession: NfcWriteSession,
+        readerPurpose: String,
+        tagId: String,
+    ) {
+        if (nfcSession.currentPhase() == NfcSessionPhase.FINISHED) {
+            Log.i(NFC_LOG_TAG, "session=${nfcSession.id} terminal guard claimed uid=$tagId")
+            holdNfcTagUntilRemoved(tag, nfcSession)
+        } else {
+            Log.i(
+                NFC_LOG_TAG,
+                "session=${nfcSession.id} $readerPurpose callback ignored phase=${nfcSession.currentPhase()} uid=$tagId",
+            )
+        }
+    }
+
+    private fun enableNfcGuardReader(nfcSession: NfcWriteSession) {
+        val adapter = nfcAdapter ?: return
+        if (this.nfcSession !== nfcSession || nfcSession.currentPhase() != NfcSessionPhase.FINISHED) return
+        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} terminal guard reader enabled")
+        adapter.enableReaderMode(
+            this,
+            { tag -> holdNfcTagUntilRemoved(tag, nfcSession) },
+            NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
+                NfcAdapter.FLAG_READER_NFC_F or NfcAdapter.FLAG_READER_NFC_V or
+                NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+            null,
+        )
+    }
+
+    private fun holdNfcTagUntilRemoved(tag: Tag, nfcSession: NfcWriteSession) {
+        if (this.nfcSession !== nfcSession || nfcSession.currentPhase() != NfcSessionPhase.FINISHED) return
+        if (!nfcTagGuard.beginWaitingForRemoval()) return
+        val tagId = tag.id.joinToString("") { "%02X".format(it.toInt() and 0xff) }
+        val ignored = nfcAdapter?.ignore(
+            tag,
+            NFC_TAG_REMOVAL_DEBOUNCE_MS,
+            NfcAdapter.OnTagRemovedListener {
+                if (this.nfcSession === nfcSession) {
+                    Log.i(NFC_LOG_TAG, "session=${nfcSession.id} guarded tag removed uid=$tagId")
+                    if (nfcTagGuard.tagRemoved()) stopNfcGuard(nfcSession)
+                }
+            },
+            nfcMainHandler,
+        ) == true
+        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} native dispatch suppression active=$ignored uid=$tagId")
+        if (!ignored) {
+            runOnUiThread {
+                if (this.nfcSession === nfcSession && nfcTagGuard.tagRemoved()) stopNfcGuard(nfcSession)
+            }
+        }
+    }
+
+    private fun stopNfcGuard(nfcSession: NfcWriteSession) {
+        if (this.nfcSession !== nfcSession) return
+        nfcAdapter?.disableReaderMode(this)
+        this.nfcSession = null
+        Log.i(NFC_LOG_TAG, "session=${nfcSession.id} terminal guard stopped safely")
     }
 
     private fun updateNfcProgress(nfcSession: NfcWriteSession, currentStep: Int, message: String) {

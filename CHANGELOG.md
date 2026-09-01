@@ -1,5 +1,12 @@
 # Journal des versions
 
+## 0.5.2
+
+- maintien d'un mode lecteur NFC de garde après la vérification finale afin d'empêcher Android d'ouvrir nativement le contenu NDEF du tag ;
+- mise en attente basse consommation du tag terminé avec `NfcAdapter.ignore`, jusqu'à son retrait effectif du téléphone ;
+- arrêt du mode de garde uniquement lorsque le résultat a été fermé et que le tag a été retiré, sans nouvelle lecture ni écriture ;
+- reprise sûre de cette protection après une interruption de l'activité Android et ajout des tests de ses différents ordres d'événements.
+
 ## 0.5.1
 
 - remplacement du verrou NFC Android par une machine d'état atomique propre à chaque appui sur **Écrire le tag NFC** ;
